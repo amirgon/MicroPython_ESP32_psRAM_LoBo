@@ -119,7 +119,6 @@
 		<buildTargets>
 			<target name="BUILD" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
-				<buildArguments/>
 				<buildTarget>-j8 all</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -127,7 +126,6 @@
 			</target>
 			<target name="FLASH" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
-				<buildArguments/>
 				<buildTarget>flash</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -135,7 +133,6 @@
 			</target>
 			<target name="CLEAN" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
-				<buildArguments/>
 				<buildTarget>clean</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -143,6 +140,7 @@
 			</target>
 			<target name="BUILD (verbose)" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
+				<buildArguments/>
 				<buildTarget>-v all</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -150,6 +148,7 @@
 			</target>
 			<target name="FLASH - 8MB" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
+				<buildArguments/>
 				<buildTarget>-f8 flash</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -157,28 +156,30 @@
 			</target>
 			<target name="FLASH - 16MB" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
+				<buildArguments/>
 				<buildTarget>-f16 flash</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
 				<runAllBuilders>true</runAllBuilders>
 			</target>
 			<target name="run esp-idf Monitor" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
-				<buildCommand>mate-terminal</buildCommand>
+				<buildCommand>gnome-terminal</buildCommand>
 				<buildArguments>--working-directory="${PWD}" -e "./BUILD.sh monitor" &amp;</buildArguments>
+				<buildTarget/>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
 				<runAllBuilders>true</runAllBuilders>
 			</target>
 			<target name="run Minicom" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
-				<buildCommand>mate-terminal</buildCommand>
+				<buildCommand>gnome-terminal</buildCommand>
 				<buildArguments>--working-directory="${PWD}" -e "minicom"</buildArguments>
+				<buildTarget/>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
 				<runAllBuilders>true</runAllBuilders>
 			</target>
 			<target name="CLEAN &amp; BUILD" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
-				<buildArguments/>
 				<buildTarget>-j8 clean all</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -186,7 +187,6 @@
 			</target>
 			<target name="CLEAN, BUILD &amp; FLASH" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
-				<buildArguments/>
 				<buildTarget>-j8 clean all flash</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
@@ -195,13 +195,13 @@
 			<target name="Menuconfig" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>gnome-terminal</buildCommand>
 				<buildArguments>--working-directory="${PWD}" -e "./BUILD.sh menuconfig" &amp;</buildArguments>
-				<buildTarget/>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
 				<runAllBuilders>true</runAllBuilders>
 			</target>
 			<target name="CLEAN &amp; BUILD (verbose)" path="" targetID="org.eclipse.cdt.build.MakeTargetBuilder">
 				<buildCommand>${PWD}/BUILD.sh</buildCommand>
+				<buildArguments/>
 				<buildTarget>-j8 -v clean all</buildTarget>
 				<stopOnError>true</stopOnError>
 				<useDefaultCommand>false</useDefaultCommand>
