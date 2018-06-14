@@ -315,6 +315,12 @@ menu "MicroPython"
 	        help
 	        Include Display module into build
 	        Display module includes support for various SPI TFT displays
+	        
+	    config MICROPY_USE_AUDIO
+	    	bool "Use Audio module"
+	    	default n
+	    	help
+	    	Include Audio module into build 
 	
 	    config MICROPY_USE_EVE
 	        bool "Use EVE display module (experimental, do not enable)"
