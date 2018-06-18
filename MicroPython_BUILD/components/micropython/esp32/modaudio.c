@@ -28,16 +28,36 @@
 #include "py/obj.h"
 #include "py/runtime.h"
 #include "py/binary.h"
+#include "esp_log.h"
+#include "driver/i2s.h"
+#include "driver/adc.h"
+
+#define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY+1)
+#define I2S_NUM                     (I2S_NUM_0)
+#define I2S_ADC_UNIT                (ADC_UNIT_1)
+#define BITS_PER_SAMPLE             (16)
+#define BYTES_PER_SAMPLE            (BITS_PER_SAMPLE/8)
+#define SAMPLE_TYPECODE             'H'
+
 
 typedef struct audio_recording_t {
 	mp_obj_base_t base;
 	uint32_t freq;
 	uint32_t len;
 	void *data;
+	TaskHandle_t recordingTask;
 } audio_recording_t;
 
+STATIC mp_obj_t audio_recording_close(mp_obj_t self_in);
+STATIC mp_obj_t audio_recording_data(mp_obj_t self_in);
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_close_obj, audio_recording_close);
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_data_obj, audio_recording_data);
 
-STATIC const mp_rom_map_elem_t recording_locals_dict_table[] = { };
+STATIC const mp_rom_map_elem_t recording_locals_dict_table[] = {
+        {MP_OBJ_NEW_QSTR(MP_QSTR_close), (mp_obj_t)&audio_recording_close_obj},
+        {MP_OBJ_NEW_QSTR(MP_QSTR___del__), (mp_obj_t)&audio_recording_close_obj},
+        {MP_OBJ_NEW_QSTR(MP_QSTR_data), (mp_obj_t)&audio_recording_data_obj},
+};
 STATIC MP_DEFINE_CONST_DICT(recording_locals_dict, recording_locals_dict_table);
 
 STATIC void recording_print( const mp_print_t *print,
@@ -59,7 +79,33 @@ STATIC const mp_obj_type_t audio_recording_type = {
 
 
 STATIC mp_obj_t init(){
+    esp_log_level_set("I2S", ESP_LOG_DEBUG);
+    esp_log_level_set("RTC_MODULE", ESP_LOG_DEBUG);
 	return mp_const_none;
+}
+
+STATIC mp_obj_t audio_recording_data(mp_obj_t self_in)
+{
+    audio_recording_t *self = self_in;
+    return mp_obj_new_memoryview(SAMPLE_TYPECODE, self->len, self->data);
+}
+
+static void recordingTask(void *self_in)
+{
+    audio_recording_t *self = self_in;
+    size_t wr_size = self->len;
+    void *wr_ptr = self->data;
+    size_t bytes_read;
+
+    i2s_adc_enable(I2S_NUM);
+    while (wr_size > 0) {
+        //read data from I2S bus, in this case, from ADC.
+        i2s_read(I2S_NUM, wr_ptr, wr_size, &bytes_read, portMAX_DELAY);
+        wr_ptr += bytes_read;
+        wr_size -= bytes_read;
+    }
+    i2s_adc_disable(I2S_NUM);
+    vTaskDelete(NULL);
 }
 
 STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
@@ -67,10 +113,11 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 										size_t n_kw,
 										const mp_obj_t *all_args) {
     // parse args
-    enum { ARG_freq, ARG_len};
+    enum { ARG_channel, ARG_freq, ARG_seconds};
     static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_channel, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = ADC1_CHANNEL_0} },
         { MP_QSTR_freq, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 16000} },
-        { MP_QSTR_len, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 10}},
+        { MP_QSTR_seconds, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 10}},
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -80,8 +127,46 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	self->base.type = &audio_recording_type;
 	// set the member number with the first argument of the constructor
 	self->freq = args[ARG_freq].u_int;
-	self->len = args[ARG_len].u_int;
-	return MP_OBJ_FROM_PTR(self);
+	self->len = self->freq * args[ARG_seconds].u_int * BYTES_PER_SAMPLE;
+	self->data = m_malloc(self->len);
+	if (!self->data){
+	    mp_raise_msg(&mp_type_Exception, "Memory allocation failed!");
+	}
+
+	i2s_config_t i2s_config = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN | I2S_MODE_ADC_BUILT_IN,
+        .sample_rate =  self->freq,
+        .bits_per_sample = BITS_PER_SAMPLE,
+        .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .intr_alloc_flags = 0,
+        .dma_buf_count = 2,
+        .dma_buf_len = 1024
+	};
+	//install and start i2s driver
+    i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+    //init DAC pad
+    i2s_set_dac_mode(I2S_DAC_CHANNEL_BOTH_EN);
+    //init ADC pad
+    i2s_set_adc_mode(I2S_ADC_UNIT, args[ARG_channel].u_int);
+
+    self->recordingTask = NULL;
+    BaseType_t xReturned = xTaskCreate(recordingTask, "Recording Task", 2048, self, RECORDING_TASK_PRIORITY, &self->recordingTask);
+    if (xReturned != pdPASS){
+        vTaskDelete(self->recordingTask);
+        mp_raise_msg(&mp_type_Exception, "Failed creating recording task!");
+    }
+
+    return MP_OBJ_FROM_PTR(self);
+}
+
+STATIC mp_obj_t audio_recording_close(mp_obj_t self_in) {
+    audio_recording_t *self = self_in;
+    if (self->data){
+        m_free(self->data);
+        self->data = NULL;
+    }
+    return mp_const_none;
 }
 
 STATIC void recording_print( const mp_print_t *print,
