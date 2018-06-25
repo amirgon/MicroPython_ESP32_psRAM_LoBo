@@ -42,8 +42,8 @@
 
 typedef struct audio_recording_t {
 	mp_obj_base_t base;
-	uint32_t freq;
-	uint32_t len;
+	uint32_t freq; // In Hz
+	uint32_t len;  // In bytes
 	void *data;
 	TaskHandle_t recordingTask;
 } audio_recording_t;
@@ -87,7 +87,9 @@ STATIC mp_obj_t init(){
 STATIC mp_obj_t audio_recording_data(mp_obj_t self_in)
 {
     audio_recording_t *self = self_in;
-    return mp_obj_new_memoryview(SAMPLE_TYPECODE, self->len, self->data);
+    return self->data?
+                mp_obj_new_memoryview(SAMPLE_TYPECODE, self->len / BYTES_PER_SAMPLE, self->data):
+                mp_const_none;
 }
 
 static void recordingTask(void *self_in)
@@ -101,6 +103,17 @@ static void recordingTask(void *self_in)
     while (wr_size > 0) {
         //read data from I2S bus, in this case, from ADC.
         i2s_read(I2S_NUM, wr_ptr, wr_size, &bytes_read, portMAX_DELAY);
+
+        //TODO: average on fast memory (not psram). malloc DMA (in advance) according to I2S buffer size
+
+        // Find average
+        int64_t acc = 0;
+        for (int16_t *p = wr_ptr; ((void*)p) < (wr_ptr+bytes_read); p++) acc+=*p;
+
+        // move average to 0
+        int16_t avr = acc / (bytes_read / BYTES_PER_SAMPLE);
+        for (int16_t *p = wr_ptr; ((void*)p) < (wr_ptr+bytes_read); p++) *p -= avr;
+
         wr_ptr += bytes_read;
         wr_size -= bytes_read;
     }
@@ -138,7 +151,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
         .sample_rate =  self->freq,
         .bits_per_sample = BITS_PER_SAMPLE,
         .communication_format = I2S_COMM_FORMAT_I2S_MSB,
-        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
         .intr_alloc_flags = 0,
         .dma_buf_count = 2,
         .dma_buf_len = 1024
@@ -175,7 +188,11 @@ STATIC void recording_print( const mp_print_t *print,
     // get a ptr to the C-struct of the object
 	audio_recording_t *self = MP_OBJ_TO_PTR(self_in);
     // print the number
-	mp_printf (print, "recording(freq=%u, len=%u)", self->freq, self->len);
+	if (self->data){
+	    mp_printf (print, "recording(freq=%u, len=%u)", self->freq, self->len);
+	} else {
+	    mp_printf (print, "recording(closed)");
+	}
 }
 
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(init_obj, init);

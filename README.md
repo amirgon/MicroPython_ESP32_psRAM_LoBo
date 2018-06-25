@@ -1,3 +1,12 @@
+
+# amirgon notes
+
+set xrange [0:16000]
+set yrange [0:4000]
+plot "r.bin" binary format='%uint16' using 0:1 with lines
+play -t raw -r 32k -e unsigned -b 16 -c 1 r.bin
+
+
 # MicroPython for ESP32
 
 # with support for 4MB of psRAM
