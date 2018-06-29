@@ -38,6 +38,7 @@
 #define BITS_PER_SAMPLE             (16)
 #define BYTES_PER_SAMPLE            (BITS_PER_SAMPLE/8)
 #define SAMPLE_TYPECODE             'H'
+#define DMA_BUF_SIZE                1024
 
 
 typedef struct audio_recording_t {
@@ -81,6 +82,7 @@ STATIC const mp_obj_type_t audio_recording_type = {
 STATIC mp_obj_t init(){
     esp_log_level_set("I2S", ESP_LOG_DEBUG);
     esp_log_level_set("RTC_MODULE", ESP_LOG_DEBUG);
+    esp_log_level_set("AUDIO", ESP_LOG_VERBOSE);
 	return mp_const_none;
 }
 
@@ -98,11 +100,12 @@ static void recordingTask(void *self_in)
     size_t wr_size = self->len;
     void *wr_ptr = self->data;
     size_t bytes_read;
+    size_t iter = 0;
 
     i2s_adc_enable(I2S_NUM);
     while (wr_size > 0) {
         //read data from I2S bus, in this case, from ADC.
-        i2s_read(I2S_NUM, wr_ptr, wr_size, &bytes_read, portMAX_DELAY);
+        i2s_read(I2S_NUM, wr_ptr, MIN(DMA_BUF_SIZE, wr_size), &bytes_read, portMAX_DELAY);
 
         //TODO: average on fast memory (not psram). malloc DMA (in advance) according to I2S buffer size
 
@@ -114,10 +117,14 @@ static void recordingTask(void *self_in)
         int16_t avr = acc / (bytes_read / BYTES_PER_SAMPLE);
         for (int16_t *p = wr_ptr; ((void*)p) < (wr_ptr+bytes_read); p++) *p -= avr;
 
+        //ESP_LOGD("AUDIO", "recordingTask:bytes_read = %zu, wr_ptr = %p, wr_size = %zu, avr = %d", bytes_read, wr_ptr, wr_size, avr);
+
         wr_ptr += bytes_read;
         wr_size -= bytes_read;
+        iter++;
     }
     i2s_adc_disable(I2S_NUM);
+    //ESP_LOGD("AUDIO", "i2s_read was called %d times", iter);
     vTaskDelete(NULL);
 }
 
@@ -154,7 +161,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
         .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
         .intr_alloc_flags = 0,
         .dma_buf_count = 2,
-        .dma_buf_len = 1024
+        .dma_buf_len = DMA_BUF_SIZE
 	};
 	//install and start i2s driver
     i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
@@ -175,6 +182,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 
 STATIC mp_obj_t audio_recording_close(mp_obj_t self_in) {
     audio_recording_t *self = self_in;
+    i2s_driver_uninstall(I2S_NUM);
     if (self->data){
         m_free(self->data);
         self->data = NULL;
