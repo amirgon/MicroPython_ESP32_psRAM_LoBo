@@ -260,7 +260,8 @@ LIBS_SRC_C += \
 	esp32/libs/tft/SmallFont.c \
 	esp32/libs/tft/tooney32.c \
 	esp32/libs/tft/Ubuntu16.c \
-	esp32/libs/tft/def_small.c
+	esp32/libs/tft/def_small.c \
+	esp32/libs/tft/arial_heb.c 
 endif
 
 ifdef CONFIG_MICROPY_USE_EVE

@@ -159,17 +159,20 @@ extern const color_t TFT_PINK;
 #define LASTY	8000
 
 // === Embedded fonts constants ===
-#define DEFAULT_FONT	0
-#define DEJAVU18_FONT	1
-#define DEJAVU24_FONT	2
-#define UBUNTU16_FONT	3
-#define COMIC24_FONT	4
-#define MINYA24_FONT	5
-#define TOONEY32_FONT	6
-#define SMALL_FONT		7
-#define DEF_SMALL_FONT	8
-#define FONT_7SEG		9
-#define USER_FONT		10  // font will be read from file
+#define DEFAULT_FONT	    0
+#define DEJAVU18_FONT	    1
+#define DEJAVU24_FONT	    2
+#define UBUNTU16_FONT	    3
+#define COMIC24_FONT	    4
+#define MINYA24_FONT	    5
+#define TOONEY32_FONT	    6
+#define SMALL_FONT		    7
+#define DEF_SMALL_FONT	    8
+#define FONT_7SEG		    9
+#define ARIALHEB18_FONT     10
+#define ARIALHEB27_FONT     11
+#define ARIALBHEB36_FONT    12
+#define USER_FONT		    13  // font will be read from file
 
 #define IMAGE_TYPE_JPG	1
 #define IMAGE_TYPE_BMP	2
