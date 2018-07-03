@@ -32,7 +32,7 @@
 #include "driver/i2s.h"
 #include "driver/adc.h"
 
-#define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY+1)
+#define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY)
 #define I2S_NUM                     (I2S_NUM_0)
 #define I2S_ADC_UNIT                (ADC_UNIT_1)
 #define BITS_PER_SAMPLE             (16)
@@ -171,7 +171,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
     i2s_set_adc_mode(I2S_ADC_UNIT, args[ARG_channel].u_int);
 
     self->recordingTask = NULL;
-    BaseType_t xReturned = xTaskCreate(recordingTask, "Recording Task", 2048, self, RECORDING_TASK_PRIORITY, &self->recordingTask);
+    BaseType_t xReturned = xTaskCreate(recordingTask, "Recording Task", 4096, self, RECORDING_TASK_PRIORITY, &self->recordingTask);
     if (xReturned != pdPASS){
         vTaskDelete(self->recordingTask);
         mp_raise_msg(&mp_type_Exception, "Failed creating recording task!");
