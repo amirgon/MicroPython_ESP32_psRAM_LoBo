@@ -3,7 +3,8 @@
 
 plot "r1.bin" binary format='%int16' using 0:1 with lines
 play -t raw -r 16k -e signed -b 16 -c 1 r1.bin vol  30
-
+ampy --port /dev/ttyUSB0 put script.py
+:€ýb€ýalet view=winsaveview()ggvG"*y:call winrestview(view)
 
 # MicroPython for ESP32
 

@@ -35,10 +35,11 @@
 #define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY)
 #define I2S_NUM                     (I2S_NUM_0)
 #define I2S_ADC_UNIT                (ADC_UNIT_1)
-#define BITS_PER_SAMPLE             (16)
+#define BITS_PER_SAMPLE             (16) // there is an assumption it's 16 bit so we use int16_t to store samples!
 #define BYTES_PER_SAMPLE            (BITS_PER_SAMPLE/8)
 #define SAMPLE_TYPECODE             'H'
 #define DMA_BUF_SIZE                1024
+#define ALPHA_SHIFT                 8
 
 
 typedef struct audio_recording_t {
@@ -46,6 +47,7 @@ typedef struct audio_recording_t {
 	uint32_t freq; // In Hz
 	uint32_t len;  // In bytes
 	void *data;
+	uint32_t alpha; // alpha scaled up ^ ALPHA_SHIFT, for low pass filter.
 	TaskHandle_t recordingTask;
 } audio_recording_t;
 
@@ -99,11 +101,14 @@ static void recordingTask(void *self_in)
     audio_recording_t *self = self_in;
     size_t wr_size = self->len;
     void *wr_ptr = self->data;
+    int32_t alpha = self->alpha;
     size_t bytes_read;
     size_t iter = 0;
 
     i2s_adc_enable(I2S_NUM);
     while (wr_size > 0) {
+        vTaskDelay(1);
+
         //read data from I2S bus, in this case, from ADC.
         i2s_read(I2S_NUM, wr_ptr, MIN(DMA_BUF_SIZE, wr_size), &bytes_read, portMAX_DELAY);
 
@@ -115,7 +120,18 @@ static void recordingTask(void *self_in)
 
         // move average to 0
         int16_t avr = acc / (bytes_read / BYTES_PER_SAMPLE);
-        for (int16_t *p = wr_ptr; ((void*)p) < (wr_ptr+bytes_read); p++) *p -= avr;
+
+        // Average and apply low pass filter:
+
+        // Handle first sample specially, without applying the filter
+        *((int16_t*) wr_ptr) -= avr;
+
+        // Handle the rest of the data
+        for (int16_t *p = wr_ptr+BYTES_PER_SAMPLE; ((void*)p) < (wr_ptr+bytes_read); p++) {
+            int16_t currentSample = *p - avr;
+            int16_t prevSample = *(p-1);
+            *p = prevSample + ((alpha*(currentSample - prevSample))>>ALPHA_SHIFT);
+        }
 
         //ESP_LOGD("AUDIO", "recordingTask:bytes_read = %zu, wr_ptr = %p, wr_size = %zu, avr = %d", bytes_read, wr_ptr, wr_size, avr);
 
@@ -124,7 +140,7 @@ static void recordingTask(void *self_in)
         iter++;
     }
     i2s_adc_disable(I2S_NUM);
-    //ESP_LOGD("AUDIO", "i2s_read was called %d times", iter);
+    ESP_LOGD("AUDIO", "i2s_read was called %d times", iter);
     vTaskDelete(NULL);
 }
 
@@ -133,11 +149,12 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 										size_t n_kw,
 										const mp_obj_t *all_args) {
     // parse args
-    enum { ARG_channel, ARG_freq, ARG_seconds};
+    enum { ARG_channel, ARG_freq, ARG_seconds, ARG_alpha};
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_channel, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = ADC1_CHANNEL_0} },
         { MP_QSTR_freq, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 16000} },
         { MP_QSTR_seconds, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 10}},
+        { MP_QSTR_alpha, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 1UL<<ALPHA_SHIFT}},
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -149,12 +166,13 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	self->freq = args[ARG_freq].u_int;
 	self->len = self->freq * args[ARG_seconds].u_int * BYTES_PER_SAMPLE;
 	self->data = m_malloc(self->len);
+	self->alpha = args[ARG_alpha].u_int;
 	if (!self->data){
 	    mp_raise_msg(&mp_type_Exception, "Memory allocation failed!");
 	}
 
 	i2s_config_t i2s_config = {
-        .mode = I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN | I2S_MODE_ADC_BUILT_IN,
+        .mode = I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN,
         .sample_rate =  self->freq,
         .bits_per_sample = BITS_PER_SAMPLE,
         .communication_format = I2S_COMM_FORMAT_I2S_MSB,
