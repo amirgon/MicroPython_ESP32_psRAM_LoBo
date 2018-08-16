@@ -31,6 +31,7 @@
 #include "esp_log.h"
 #include "driver/i2s.h"
 #include "driver/adc.h"
+#include "moddisplay.h"
 
 #define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY)
 #define I2S_NUM                     (I2S_NUM_0)
@@ -40,6 +41,7 @@
 #define SAMPLE_TYPECODE             'H'
 #define DMA_BUF_SIZE                1024
 #define ALPHA_SHIFT                 8
+#define DISPLAY_FACTOR              3
 
 
 typedef struct audio_recording_t {
@@ -49,6 +51,13 @@ typedef struct audio_recording_t {
 	void *data;
 	uint32_t alpha; // alpha scaled up ^ ALPHA_SHIFT, for low pass filter.
 	TaskHandle_t recordingTask;
+
+	display_tft_obj_t *display;
+	int16_t x0,y0,x1,y1;
+	uint32_t frameRate;
+	uint8_t displayFactor; // how much to shift-right each sample before drawing it
+	color_t color;
+
 } audio_recording_t;
 
 STATIC mp_obj_t audio_recording_close(mp_obj_t self_in);
@@ -105,6 +114,15 @@ static void recordingTask(void *self_in)
     size_t bytes_read;
     size_t iter = 0;
 
+    bool display = self->display != NULL;
+    uint32_t displayLineRate = self->frameRate * (self->x1 - self->x0 + 1);
+    uint32_t displayLineSampleCount = self->freq / displayLineRate;
+    uint32_t samplesToDisplayLine = 1;
+    uint16_t x = self->x0;
+    uint16_t mid_y = (self->y0 + self->y1) / 2;
+    int16_t displayLineMin = INT16_MAX;
+    int16_t displayLineMax = INT16_MIN;
+
     i2s_adc_enable(I2S_NUM);
     while (wr_size > 0) {
         vTaskDelay(1);
@@ -121,16 +139,38 @@ static void recordingTask(void *self_in)
         // move average to 0
         int16_t avr = acc / (bytes_read / BYTES_PER_SAMPLE);
 
-        // Average and apply low pass filter:
-
         // Handle first sample specially, without applying the filter
         *((int16_t*) wr_ptr) -= avr;
 
         // Handle the rest of the data
         for (int16_t *p = wr_ptr+BYTES_PER_SAMPLE; ((void*)p) < (wr_ptr+bytes_read); p++) {
+
+            // Average
+
             int16_t currentSample = *p - avr;
+
+            // Apply low pass filter
+
             int16_t prevSample = *(p-1);
             *p = prevSample + ((alpha*(currentSample - prevSample))>>ALPHA_SHIFT);
+
+            // Display the waveform
+
+            displayLineMin = MIN(displayLineMin, *p);
+            displayLineMax = MAX(displayLineMax, *p);
+
+            if (display && --samplesToDisplayLine == 0){
+                samplesToDisplayLine = displayLineSampleCount;
+
+                TFT_drawLine(x, self->y0, x, self->y1, _bg);
+                TFT_drawLine(x, MAX(self->y0, mid_y + (displayLineMin>>self->displayFactor)),
+                             x, MIN(self->y1, mid_y + (displayLineMax>>self->displayFactor)),
+                             self->color);
+
+                if (x == self->x1) x = self->x0; else x++;
+                displayLineMin = INT16_MAX;
+                displayLineMax = INT16_MIN;
+            }
         }
 
         //ESP_LOGD("AUDIO", "recordingTask:bytes_read = %zu, wr_ptr = %p, wr_size = %zu, avr = %d", bytes_read, wr_ptr, wr_size, avr);
@@ -149,12 +189,39 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 										size_t n_kw,
 										const mp_obj_t *all_args) {
     // parse args
-    enum { ARG_channel, ARG_freq, ARG_seconds, ARG_alpha};
+
+    enum {
+        ARG_channel,
+        ARG_freq,
+        ARG_seconds,
+
+        ARG_alpha,
+
+        ARG_display,
+        ARG_x0,
+        ARG_y0,
+        ARG_x1,
+        ARG_y1,
+        ARG_frameRate,
+        ARG_displayFactor,
+        ARG_color
+    };
+
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_channel, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = ADC1_CHANNEL_0} },
         { MP_QSTR_freq, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 16000} },
         { MP_QSTR_seconds, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 10}},
+
         { MP_QSTR_alpha, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 1UL<<ALPHA_SHIFT}},
+
+        { MP_QSTR_display, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_obj = NULL}},
+        { MP_QSTR_x0, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0}},
+        { MP_QSTR_y0, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0}},
+        { MP_QSTR_x1, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0}},
+        { MP_QSTR_y1, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0}},
+        { MP_QSTR_frameRate, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 10}},
+        { MP_QSTR_displayFactor, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = DISPLAY_FACTOR}},
+        { MP_QSTR_color, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -1}},
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -166,9 +233,27 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	self->freq = args[ARG_freq].u_int;
 	self->len = self->freq * args[ARG_seconds].u_int * BYTES_PER_SAMPLE;
 	self->data = m_malloc(self->len);
-	self->alpha = args[ARG_alpha].u_int;
 	if (!self->data){
 	    mp_raise_msg(&mp_type_Exception, "Memory allocation failed!");
+	}
+
+	self->alpha = args[ARG_alpha].u_int;
+
+	self->display =  args[ARG_display].u_obj;
+	self->x0 = args[ARG_x0].u_int;
+	self->x1 = args[ARG_x1].u_int;
+	self->y0 = args[ARG_y0].u_int;
+	self->y1 = args[ARG_y1].u_int;
+	self->frameRate = args[ARG_frameRate].u_int;
+	self->displayFactor = args[ARG_displayFactor].u_int;
+	self->color = _fg;
+	if (self->display) {
+	    if (TFT_setupDevice(self->display)) {
+	        mp_raise_msg(&mp_type_Exception, "Display need to be initialized first!");
+	    }
+	}
+	if (args[ARG_color].u_int >= 0) {
+	    self->color = intToColor(args[ARG_color].u_int);
 	}
 
 	i2s_config_t i2s_config = {
@@ -215,7 +300,12 @@ STATIC void recording_print( const mp_print_t *print,
 	audio_recording_t *self = MP_OBJ_TO_PTR(self_in);
     // print the number
 	if (self->data){
-	    mp_printf (print, "recording(freq=%u, len=%u)", self->freq, self->len);
+	    mp_printf (print, "recording(freq=%u, len=%u", self->freq, self->len);
+	    if (self->display){
+	        mp_printf (print, ", display=true, x0=%u, y0=%u, x1=%u, y1=%u, frameRate=%u, displayFactor=%u, color=%u",
+	                self->x0, self->y0, self->x1, self->y1, self->frameRate, self->displayFactor, self->color);
+	    }
+	    mp_printf (print, ")");
 	} else {
 	    mp_printf (print, "recording(closed)");
 	}

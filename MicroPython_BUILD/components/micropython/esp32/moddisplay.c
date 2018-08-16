@@ -24,6 +24,8 @@
  * THE SOFTWARE.
  */
 
+#include "moddisplay.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -37,55 +39,25 @@
 #include "esp_task_wdt.h"
 #include <sys/time.h>
 
-#include "py/obj.h"
-#include "py/objint.h"
-#include "py/runtime.h"
-
 #include "driver/gpio.h"
-#include "tft/tftspi.h"
-#include "tft/tft.h"
 #include "extmod/vfs_native.h"
-#include "machine_hw_spi.h"
 #include "modmachine.h"
 
-
-typedef struct _display_tft_obj_t {
-    mp_obj_base_t base;
-    machine_hw_spi_obj_t *spi;
-    display_config_t dconfig;
-    exspi_device_handle_t disp_spi_dev;
-    exspi_device_handle_t ts_spi_dev;
-    exspi_device_handle_t *disp_spi;
-    exspi_device_handle_t *ts_spi;
-    uint32_t tp_calx;
-    uint32_t tp_caly;
-} display_tft_obj_t;
 
 const mp_obj_type_t display_tft_type;
 
 uint8_t disp_used_spi_host = 0;
 
-static const char* const display_types[] = {
-	"ILI9341",
-	"ILI9488",
-	"ST7789V",
-	"ST7735",
-	"ST7735R",
-	"ST7735B",
-	"M5STACK",
-	"Unknown",
-};
+static const char* const display_types[] = { "ILI9341", "ILI9488", "ST7789V",
+        "ST7735", "ST7735R", "ST7735B", "M5STACK", "Unknown", };
 
-static const char* const touch_types[] = {
-	"None",
-	"xpt2046",
-	"stmpe610",
-	"Unknown",
-};
+static const char* const touch_types[] = { "None", "xpt2046", "stmpe610",
+        "Unknown", };
 
 // constructor(id, ...)
 //-----------------------------------------------------------------------------------------------------------------
-STATIC mp_obj_t display_tft_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+STATIC mp_obj_t display_tft_make_new(const mp_obj_type_t *type, size_t n_args,
+        size_t n_kw, const mp_obj_t *args) {
 
     display_tft_obj_t *self = m_new_obj(display_tft_obj_t); //(display_tft_obj_t*)&display_tft_obj;
     self->base.type = &display_tft_type;
@@ -106,53 +78,29 @@ STATIC mp_obj_t display_tft_make_new(const mp_obj_type_t *type, size_t n_args, s
 }
 
 //-----------------------------------------------------------------------------------------------
-STATIC void display_tft_printinfo(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind)
-{
-	display_tft_obj_t *self = self_in;
+STATIC void display_tft_printinfo(const mp_print_t *print, mp_obj_t self_in,
+        mp_print_kind_t kind) {
+    display_tft_obj_t *self = self_in;
     if (self->disp_spi->handle) {
-    	mp_printf(print, "TFT   (%dx%d, Type=%s, Ready: %s, Color mode: %d-bit, Clk=%u Hz, RdClk=%u Hz, Touch: %s)\n",
-    			self->dconfig.width, self->dconfig.height, display_types[self->dconfig.type], ((self->disp_spi->handle) ? "yes" : "no"), self->dconfig.color_bits, self->dconfig.speed, self->dconfig.rdspeed, ((self->ts_spi->handle) ? "yes" : "no"));
-    	mp_printf(print, "Pins  (miso=%d, mosi=%d, clk=%d, cs=%d, dc=%d, reset=%d, backlight=%d)", self->dconfig.miso, self->dconfig.mosi, self->dconfig.sck, self->dconfig.cs, self->dconfig.dc, self->dconfig.rst, self->dconfig.bckl);
-    	if (self->ts_spi->handle) {
-    		mp_printf(print, "\nTouch (Enabled, type: %s, cs=%d)", touch_types[self->dconfig.touch], self->dconfig.tcs);
-    	}
+        mp_printf(print,
+                "TFT   (%dx%d, Type=%s, Ready: %s, Color mode: %d-bit, Clk=%u Hz, RdClk=%u Hz, Touch: %s)\n",
+                self->dconfig.width, self->dconfig.height,
+                display_types[self->dconfig.type],
+                ((self->disp_spi->handle) ? "yes" : "no"),
+                self->dconfig.color_bits, self->dconfig.speed,
+                self->dconfig.rdspeed, ((self->ts_spi->handle) ? "yes" : "no"));
+        mp_printf(print,
+                "Pins  (miso=%d, mosi=%d, clk=%d, cs=%d, dc=%d, reset=%d, backlight=%d)",
+                self->dconfig.miso, self->dconfig.mosi, self->dconfig.sck,
+                self->dconfig.cs, self->dconfig.dc, self->dconfig.rst,
+                self->dconfig.bckl);
+        if (self->ts_spi->handle) {
+            mp_printf(print, "\nTouch (Enabled, type: %s, cs=%d)",
+                    touch_types[self->dconfig.touch], self->dconfig.tcs);
+        }
+    } else {
+        mp_printf(print, "TFT (Not initialized)");
     }
-    else {
-    	mp_printf(print, "TFT (Not initialized)");
-    }
-}
-
-/*
- * tftspi.c low level driver uses some global variables
- * Here we set those variables so that multiple displays can be used
- */
-//-------------------------------------------------
-static int setupDevice(display_tft_obj_t *disp_dev)
-{
-    if (disp_dev->disp_spi->handle == NULL) return 1;
-
-    if (disp_spi != disp_dev->disp_spi) {
-		disp_spi = disp_dev->disp_spi;
-		ts_spi = disp_dev->ts_spi;
-		TFT_display_setvars(&disp_dev->dconfig);
-
-		tp_calx = disp_dev->tp_calx;
-		tp_caly = disp_dev->tp_caly;
-		spi_device_select(disp_spi, 1);
-		spi_device_deselect(disp_spi);
-    }
-
-	return 0;
-}
-
-//--------------------------------------
-STATIC color_t intToColor(uint32_t cint)
-{
-	color_t cl = {0,0,0};
-	cl.r = (cint >> 16) & 0xFF;
-	cl.g = (cint >> 8) & 0xFF;
-	cl.b = cint & 0xFF;
-	return cl;
 }
 
 //------------------------------------------------------
@@ -339,7 +287,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_init_obj, 0, display_tft_init);
 STATIC mp_obj_t display_tft_deinit(mp_obj_t self_in)
 {
     display_tft_obj_t *self = self_in;
-    if (setupDevice(self) == 0) {
+    if (TFT_setupDevice(self) == 0) {
     	spi_deinit_internal(self);
     }
     return mp_const_none;
@@ -355,7 +303,7 @@ STATIC mp_obj_t display_tft_drawPixel(size_t n_args, const mp_obj_t *pos_args, m
         { MP_QSTR_color,               MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
 	mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -379,7 +327,7 @@ STATIC mp_obj_t display_tft_readPixel(size_t n_args, const mp_obj_t *pos_args, m
         { MP_QSTR_y, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = 0 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -405,7 +353,7 @@ STATIC mp_obj_t display_tft_drawLine(size_t n_args, const mp_obj_t *pos_args, mp
         { MP_QSTR_color,                   MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -436,7 +384,7 @@ STATIC mp_obj_t display_tft_drawLineByAngle(size_t n_args, const mp_obj_t *pos_a
         { MP_QSTR_color,                    MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -470,7 +418,7 @@ STATIC mp_obj_t display_tft_drawTriangle(size_t n_args, const mp_obj_t *pos_args
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -505,7 +453,7 @@ STATIC mp_obj_t display_tft_drawCircle(size_t n_args, const mp_obj_t *pos_args, 
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -540,7 +488,7 @@ STATIC mp_obj_t display_tft_drawEllipse(size_t n_args, const mp_obj_t *pos_args,
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -577,7 +525,7 @@ STATIC mp_obj_t display_tft_drawArc(size_t n_args, const mp_obj_t *pos_args, mp_
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -616,7 +564,7 @@ STATIC mp_obj_t display_tft_drawPoly(size_t n_args, const mp_obj_t *pos_args, mp
         { MP_QSTR_rotate,                   MP_ARG_INT, { .u_int = 0 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -652,7 +600,7 @@ STATIC mp_obj_t display_tft_drawRect(size_t n_args, const mp_obj_t *pos_args, mp
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -685,7 +633,7 @@ STATIC mp_obj_t display_tft_readScreen(size_t n_args, const mp_obj_t *pos_args, 
         { MP_QSTR_buffer,                   MP_ARG_OBJ, { .u_obj = mp_const_none } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -759,7 +707,7 @@ STATIC mp_obj_t display_tft_drawRoundRect(size_t n_args, const mp_obj_t *pos_arg
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -789,7 +737,7 @@ STATIC mp_obj_t display_tft_fillScreen(size_t n_args, const mp_obj_t *pos_args, 
         { MP_QSTR_color,                    MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -811,7 +759,7 @@ STATIC mp_obj_t display_tft_fillWin(size_t n_args, const mp_obj_t *pos_args, mp_
         { MP_QSTR_color,                    MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -836,7 +784,7 @@ STATIC mp_obj_t display_tft_7segAttrib(size_t n_args, const mp_obj_t *pos_args, 
         { MP_QSTR_color,   MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -861,7 +809,7 @@ STATIC mp_obj_t display_tft_setFont(size_t n_args, const mp_obj_t *pos_args, mp_
         { MP_QSTR_color,        MP_ARG_KW_ONLY  | MP_ARG_INT, { .u_int = 0 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -898,7 +846,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_setFont_obj, 1, display_tft_setFon
 STATIC mp_obj_t display_tft_getFontSize(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args)
 {
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     int width, height;
     TFT_getfontsize(&width, &height);
@@ -919,7 +867,7 @@ STATIC mp_obj_t display_tft_setRot(size_t n_args, const mp_obj_t *pos_args, mp_m
         { MP_QSTR_rot, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = PORTRAIT } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -950,7 +898,7 @@ STATIC mp_obj_t display_tft_print(size_t n_args, const mp_obj_t *pos_args, mp_ma
         { MP_QSTR_bgcolor,      MP_ARG_KW_ONLY  | MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -993,7 +941,7 @@ STATIC mp_obj_t display_tft_stringWidth(size_t n_args, const mp_obj_t *pos_args,
         { MP_QSTR_text,  MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = mp_const_none } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -1016,7 +964,7 @@ STATIC mp_obj_t display_tft_clearStringRect(size_t n_args, const mp_obj_t *pos_a
         { MP_QSTR_color,                     MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -1048,7 +996,7 @@ STATIC mp_obj_t display_tft_Image(size_t n_args, const mp_obj_t *pos_args, mp_ma
         { MP_QSTR_debug, MP_ARG_KW_ONLY  | MP_ARG_INT, { .u_int = 0 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -1114,7 +1062,7 @@ STATIC mp_obj_t display_tft_getTouch(size_t n_args, const mp_obj_t *pos_args, mp
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
 
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
     if (self->ts_spi->handle == NULL) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Touch not configured"));
     }
@@ -1218,7 +1166,7 @@ STATIC mp_obj_t display_tft_HSBtoRGB(size_t n_args, const mp_obj_t *pos_args, mp
         { MP_QSTR_brightness,  MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = mp_const_none } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -1245,7 +1193,7 @@ STATIC mp_obj_t display_tft_setclipwin(size_t n_args, const mp_obj_t *pos_args, 
         { MP_QSTR_fillcolor,                MP_ARG_INT, { .u_int = -1 } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -1265,7 +1213,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_setclipwin_obj, 4, display_tft_set
 STATIC mp_obj_t display_tft_resetclipwin(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
 
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     TFT_resetclipwin();
 
@@ -1277,7 +1225,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_resetclipwin_obj, 0, display_tft_r
 STATIC mp_obj_t display_tft_saveclipwin(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
 
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     TFT_saveClipWin();
 
@@ -1289,7 +1237,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_saveclipwin_obj, 0, display_tft_sa
 STATIC mp_obj_t display_tft_restoreclipwin(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
 
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     TFT_restoreClipWin();
 
@@ -1301,7 +1249,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_restoreclipwin_obj, 0, display_tft
 STATIC mp_obj_t display_tft_getSize(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
 
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_obj_t tuple[2];
     tuple[0] = mp_obj_new_int(_width);
@@ -1315,7 +1263,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_getSize_obj, 0, display_tft_getSiz
 STATIC mp_obj_t display_tft_getWinSize(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
 
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     mp_obj_t tuple[2];
     tuple[0] = mp_obj_new_int(dispWin.x2 - dispWin.x1 + 1);
@@ -1334,7 +1282,7 @@ STATIC mp_obj_t display_tft_setCalib(size_t n_args, const mp_obj_t *pos_args, mp
         { MP_QSTR_from_nvs,	MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = false } },
     };
     display_tft_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
     if (self->ts_spi->handle == NULL) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Touch not configured"));
     }
@@ -1384,7 +1332,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(display_tft_setCalib_obj, 0, display_tft_setCa
 STATIC mp_obj_t display_tft_getCalib(mp_obj_t self_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
     if (self->ts_spi->handle == NULL) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Touch not configured"));
     }
@@ -1402,7 +1350,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_1(display_tft_getCalib_obj, display_tft_getCalib)
 STATIC mp_obj_t display_tft_backlight(mp_obj_t self_in, mp_obj_t onoff_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     int onoff = mp_obj_get_int(onoff_in);
     if (onoff) bcklOn(&self->dconfig);
@@ -1416,7 +1364,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_2(display_tft_backlight_obj, display_tft_backligh
 STATIC mp_obj_t display_tft_touch_type(mp_obj_t self_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     return mp_obj_new_int(self->dconfig.touch);
 }
@@ -1429,7 +1377,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_1(display_tft_touch_type_obj, display_tft_touch_t
 STATIC mp_obj_t display_tft_set_speed(mp_obj_t self_in, mp_obj_t speed_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     int speed = mp_obj_get_int(speed_in);
 
@@ -1452,7 +1400,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_2(display_tft_set_speed_obj, display_tft_set_spee
 STATIC mp_obj_t display_tft_select(mp_obj_t self_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     disp_select();
     return mp_const_none;
@@ -1463,7 +1411,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_1(display_tft_select_obj, display_tft_select);
 STATIC mp_obj_t display_tft_deselect(mp_obj_t self_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     disp_deselect();
     return mp_const_none;
@@ -1474,7 +1422,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_1(display_tft_deselect_obj, display_tft_deselect)
 STATIC mp_obj_t display_tft_cmd_read(mp_obj_t self_in, mp_obj_t cmd_in, mp_obj_t len_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     uint8_t cmd = (uint8_t)mp_obj_get_int(cmd_in);
     uint8_t len = (uint8_t)mp_obj_get_int(len_in);
@@ -1490,7 +1438,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_3(display_tft_cmd_read_obj, display_tft_cmd_read)
 STATIC mp_obj_t display_tft_send_command(mp_obj_t self_in, mp_obj_t cmd_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     uint8_t cmd = (uint8_t)mp_obj_get_int(cmd_in);
 
@@ -1507,7 +1455,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_2(display_tft_send_command_obj, display_tft_send_
 STATIC mp_obj_t display_tft_send_cmd_data(mp_obj_t self_in, mp_obj_t cmd_in, mp_obj_t data_in)
 {
 	display_tft_obj_t *self = self_in;
-    if (setupDevice(self)) return mp_const_none;
+    if (TFT_setupDevice(self)) return mp_const_none;
 
     uint8_t cmd = (uint8_t)mp_obj_get_int(cmd_in);
     mp_buffer_info_t data;
@@ -1723,3 +1671,32 @@ const mp_obj_module_t mp_module_display = {
     .globals = (mp_obj_dict_t*)&display_module_globals,
 };
 
+/*
+ * tftspi.c low level driver uses some global variables
+ * Here we set those variables so that multiple displays can be used
+ */
+//-------------------------------------------------
+int TFT_setupDevice(display_tft_obj_t* disp_dev) {
+    if (disp_dev->disp_spi->handle == NULL)
+        return 1;
+
+    if (disp_spi != disp_dev->disp_spi) {
+        disp_spi = disp_dev->disp_spi;
+        ts_spi = disp_dev->ts_spi;
+        TFT_display_setvars(&disp_dev->dconfig);
+        tp_calx = disp_dev->tp_calx;
+        tp_caly = disp_dev->tp_caly;
+        spi_device_select(disp_spi, 1);
+        spi_device_deselect(disp_spi);
+    }
+    return 0;
+}
+
+//--------------------------------------
+color_t intToColor(uint32_t cint) {
+    color_t cl = { 0, 0, 0 };
+    cl.r = (cint >> 16) & 0xFF;
+    cl.g = (cint >> 8) & 0xFF;
+    cl.b = cint & 0xFF;
+    return cl;
+}
