@@ -24,6 +24,7 @@
  * THE SOFTWARE.
  */
 
+#include <string.h>
 #include "esp_task_wdt.h"
 #include "py/nlr.h"
 #include "py/obj.h"
@@ -34,8 +35,8 @@
 #include "driver/adc.h"
 #include "moddisplay.h"
 
-#define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY)
-#define RECORDING_TASK_STACK_SIZE   8192
+#define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY + 1)
+#define RECORDING_TASK_STACK_SIZE   (1024*16)
 #define I2S_NUM                     (I2S_NUM_0)
 #define I2S_ADC_UNIT                (ADC_UNIT_1)
 #define BITS_PER_SAMPLE             (16) // there is an assumption it's 16 bit so we use int16_t to store samples!
@@ -45,8 +46,10 @@
 #define ALPHA_SHIFT                 8
 #define DEFAULT_DISPLAY_FACTOR      3
 #define DEFAULT_FRAMERATE           25
+#define LINE_ZCR_INDICATOR_WIDTH    5
 
 #define ABS(x) ((x)>=0? (x): -(x))
+#define SWAP(type, var1, var2) do { type t = var2; var2 = var1; var1 = t; } while(0)
 
 /*
  * Recording Object Definition
@@ -54,13 +57,17 @@
 
 STATIC mp_obj_t audio_recording_close(mp_obj_t self_in);
 STATIC mp_obj_t audio_recording_data(mp_obj_t self_in);
+STATIC mp_obj_t audio_recording_wait(mp_obj_t self_in);
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_close_obj, audio_recording_close);
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_data_obj, audio_recording_data);
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_wait_obj, audio_recording_wait);
+
 
 STATIC const mp_rom_map_elem_t recording_locals_dict_table[] = {
         {MP_OBJ_NEW_QSTR(MP_QSTR_close), (mp_obj_t)&audio_recording_close_obj},
         {MP_OBJ_NEW_QSTR(MP_QSTR___del__), (mp_obj_t)&audio_recording_close_obj},
         {MP_OBJ_NEW_QSTR(MP_QSTR_data), (mp_obj_t)&audio_recording_data_obj},
+        {MP_OBJ_NEW_QSTR(MP_QSTR_wait), (mp_obj_t)&audio_recording_wait_obj},
 };
 STATIC MP_DEFINE_CONST_DICT(recording_locals_dict, recording_locals_dict_table);
 
@@ -227,7 +234,10 @@ typedef struct audio_recording_t {
     uint32_t len;  // In bytes
     void *data;
     uint32_t alpha; // alpha scaled up ^ ALPHA_SHIFT, for low pass filter.
+    uint32_t threshold; // minimum volume threshold
+    uint32_t maxSilence; // Number of milliseconds of silence before cutting recording
     TaskHandle_t recordingTask;
+    SemaphoreHandle_t done;
 
     display_tft_obj_t *display;
     viewport_t *waveViewport;
@@ -244,12 +254,18 @@ STATIC mp_obj_t audio_recording_data(mp_obj_t self_in)
                 mp_const_none;
 }
 
+STATIC mp_obj_t audio_recording_wait(mp_obj_t self_in)
+{
+    audio_recording_t *self = self_in;
+    xSemaphoreTake(self->done, portMAX_DELAY);
+    return mp_const_none;
+}
+
 static void recordingTask(void *self_in)
 {
     audio_recording_t *self = self_in;
     size_t wr_size = self->len;
     void *wr_ptr = self->data;
-    int32_t alpha = self->alpha;
     size_t bytes_read;
     size_t iter = 0;
 
@@ -258,42 +274,58 @@ static void recordingTask(void *self_in)
     uint32_t displayVolumeSampleCount = 0;
     uint32_t samplesToDisplayLine = 1;
     uint32_t samplesToDisplayVolume = 1;
-    uint16_t x = 0;
-    uint16_t mid_y = 0;
+    int16_t x = 0;
+    int16_t mid_y = 0;
     int16_t displayLineMin = INT16_MAX;
     int16_t displayLineMax = INT16_MIN;
     int16_t prevDisplayLineMin = 0;
     int16_t prevDisplayLineMax= 0;
-    int64_t volAcc = 0;
+    int64_t displayVolAcc = 0;
     int16_t lastVol = 0;
+    uint32_t lineZCR = 0;
+    bool lineZCR_enable = false;
+    uint32_t dmaBufSize = DMA_BUF_SIZE;
 
     if (self->waveViewport){
         displayLineRate = self->waveViewport->frameRate * (self->waveViewport->x1 - self->waveViewport->x0 + 1);
         displayLineSampleCount = self->freq / displayLineRate;
         x = self->waveViewport->x0;
         mid_y = (self->waveViewport->y0 + self->waveViewport->y1) / 2;
+        dmaBufSize = MIN(dmaBufSize, self->freq / self->waveViewport->frameRate);
     }
 
     if (self->volumeViewport){
         displayVolumeSampleCount = self->freq / self->volumeViewport->frameRate;
+        dmaBufSize = MIN(dmaBufSize, self->freq / self->volumeViewport->frameRate);
     }
 
+    int32_t postSilenceQuota = 0;
+    int32_t preSilenceQuota = (self->maxSilence * self->freq) / 1000;
+    bool recordingStarted = false;
 
     i2s_adc_enable(I2S_NUM);
+
     while (wr_size > 0) {
         esp_task_wdt_reset();
 
         //read data from I2S bus, in this case, from ADC.
-        i2s_read(I2S_NUM, wr_ptr, MIN(DMA_BUF_SIZE, wr_size), &bytes_read, portMAX_DELAY);
+        i2s_read(I2S_NUM, wr_ptr, MIN(dmaBufSize, wr_size), &bytes_read, portMAX_DELAY);
+
+        const uint32_t samples_read = (bytes_read / BYTES_PER_SAMPLE);
 
         //TODO: average on fast memory (not psram). malloc DMA (in advance) according to I2S buffer size
 
         // Find average
         int64_t acc = 0;
-        for (int16_t *p = wr_ptr; ((void*)p) < (wr_ptr+bytes_read); p++) acc+=*p;
+
+        for (int16_t *p = wr_ptr; ((void*)p) < (wr_ptr+bytes_read); p++) {
+            acc+=*p;
+        }
 
         // move average to 0
-        int16_t avr = acc / (bytes_read / BYTES_PER_SAMPLE);
+        const int16_t avr = acc / samples_read;
+
+        int64_t volAcc = 0;
 
         // Handle first sample specially, without applying the filter
         *((int16_t*) wr_ptr) -= avr;
@@ -301,55 +333,115 @@ static void recordingTask(void *self_in)
         // Handle the rest of the data
         for (int16_t *p = wr_ptr+BYTES_PER_SAMPLE; ((void*)p) < (wr_ptr+bytes_read); p++) {
 
-            // Average
+            // Average each sample
 
-            int16_t currentSample = *p - avr;
+            const int16_t currentSample = *p - avr;
 
             // Apply low pass filter
 
-            int16_t prevSample = *(p-1);
-            *p = prevSample + ((alpha*(currentSample - prevSample))>>ALPHA_SHIFT);
+            const int16_t prevSample = *(p-1);
+            *p = prevSample + ((self->alpha*(currentSample - prevSample))>>ALPHA_SHIFT);
 
-            // Accumulate wave/volume data. Will only be displayed if viewport is enabled
+            // Count zero crossing (actually zero crossing followed by threshold crossing)
 
-            displayLineMin = MIN(displayLineMin, *p);
-            displayLineMax = MAX(displayLineMax, *p);
-            volAcc += ABS(*p);
-
-            // Display the waveform
-
-            if (self->waveViewport && --samplesToDisplayLine == 0){
-                samplesToDisplayLine = displayLineSampleCount;
-
-                int16_t min = mid_y + (MIN(displayLineMin, prevDisplayLineMax) >> self->waveViewport->displayFactor);
-                int16_t max = mid_y + (MAX(displayLineMax, prevDisplayLineMin) >> self->waveViewport->displayFactor);
-
-                TFT_drawLine(x, self->waveViewport->y0, x, self->waveViewport->y1, _bg);
-                if (min <= self->waveViewport->y1 && max >= self->waveViewport->y0) {
-                    TFT_drawLine(x, MAX(self->waveViewport->y0, min),
-                                 x, MIN(self->waveViewport->y1, max),
-                                 self->waveViewport->color);
-                }
-
-                if (x == self->waveViewport->x1) x = self->waveViewport->x0;
-                else x++;
-
-                prevDisplayLineMin = displayLineMin;
-                prevDisplayLineMax = displayLineMax;
-                displayLineMin = INT16_MAX;
-                displayLineMax = INT16_MIN;
+            lineZCR_enable = lineZCR_enable || (prevSample < 0 && *p >= 0);
+            if (lineZCR_enable && prevSample < self->threshold && *p >= self->threshold) {
+                lineZCR++;
+                lineZCR_enable = false;
             }
 
+            // Accumulate volume data for volume threshold
+
+            volAcc += ABS(*p);
+
+            // Display the waveform, synced to zero crossing
+
+            if (lineZCR > 0) {
+
+                // Accumulate wave data.
+
+                displayLineMin = MIN(displayLineMin, *p);
+                displayLineMax = MAX(displayLineMax, *p);
+
+                // Display wave data
+
+                if (self->waveViewport && --samplesToDisplayLine == 0){
+
+                    samplesToDisplayLine = displayLineSampleCount;
+
+                    const int16_t min = MAX(self->waveViewport->y0,
+                            MIN(prevDisplayLineMax, mid_y + (displayLineMin >> self->waveViewport->displayFactor)));
+                    const int16_t max = MIN(self->waveViewport->y1,
+                            MAX(prevDisplayLineMin, mid_y + (displayLineMax >> self->waveViewport->displayFactor)));
+
+                    TFT_drawLine(x, self->waveViewport->y0, x, self->waveViewport->y1 - LINE_ZCR_INDICATOR_WIDTH, _bg);
+                    TFT_drawPixel(x, mid_y, TFT_RED, 1);
+                    if (min <= self->waveViewport->y1 && max >= self->waveViewport->y0) {
+                        TFT_drawLine(x, min, x, max, self->waveViewport->color);
+                    }
+
+                    if (x == self->waveViewport->x1) {
+                        x = self->waveViewport->x0;
+
+                        // Following are attempts to visualize the zero corssing
+/*
+                        if (lineZCR  > 0) {
+                            int w = (self->waveViewport->x1 - self->waveViewport->x0 + 1)/lineZCR;
+                            if ( 1 < w && w <= (self->waveViewport->x1 - self->waveViewport->x0) / 2){
+                                color_t color = TFT_RED;
+                                for (int16_t x=self->waveViewport->x0; x < self->waveViewport->x1; x+=w){
+                                    if (x+w > self->waveViewport->x1)
+                                        TFT_fillRect(x, self->waveViewport->y1-LINE_ZCR_INDICATOR_WIDTH,
+                                                self->waveViewport->x1-x+1, LINE_ZCR_INDICATOR_WIDTH, color);
+                                    else TFT_fillRect(x, self->waveViewport->y1-LINE_ZCR_INDICATOR_WIDTH,
+                                            w, LINE_ZCR_INDICATOR_WIDTH, color);
+                                    SWAP(uint8_t, color.r, color.g);
+                                }
+                            }
+                        } else TFT_fillRect(self->waveViewport->x0, self->waveViewport->y1-LINE_ZCR_INDICATOR_WIDTH,
+                                self->waveViewport->x1 - self->waveViewport->x0 + 1, LINE_ZCR_INDICATOR_WIDTH, _bg);
+*/
+
+
+                        /*
+                        if (lineZCR  > 0) {
+                            //int w = (self->waveViewport->x1 - self->waveViewport->x0 + 1) - lineZCR;
+                            int w = lineZCR<<2;
+                            w = MAX(w, 1);
+                            w = MIN(w, self->waveViewport->x1 - self->waveViewport->x0 + 1);
+                            TFT_fillRect(self->waveViewport->x0, self->waveViewport->y1-LINE_ZCR_INDICATOR_WIDTH,
+                                                 w, LINE_ZCR_INDICATOR_WIDTH, self->waveViewport->color);
+                            TFT_fillRect(self->waveViewport->x0+w+1, self->waveViewport->y1-LINE_ZCR_INDICATOR_WIDTH,
+                                    self->waveViewport->x1 - self->waveViewport->x0 - w - 1, LINE_ZCR_INDICATOR_WIDTH, _bg);
+                        }
+                        */
+
+                        lineZCR = 0;
+                    }
+                    else x++;
+
+                    prevDisplayLineMin = min;
+                    prevDisplayLineMax = max;
+                    displayLineMin = INT16_MAX;
+                    displayLineMax = INT16_MIN;
+                }
+            }
 
             // Display the volume
+
+            // Accumulate volume data for display
+
+            displayVolAcc += ABS(*p);
+
+            // Display volume data
 
             if (self->volumeViewport && --samplesToDisplayVolume == 0) {
                 samplesToDisplayVolume = displayVolumeSampleCount;
 
-                int16_t w = self->volumeViewport->x1 - self->volumeViewport->x0;
-                int16_t h = self->volumeViewport->y1 - self->volumeViewport->y0;
-                int16_t vol = (volAcc / displayVolumeSampleCount) >> self->volumeViewport->displayFactor;
-                int16_t vol_y0 = self->volumeViewport->y0 + h - vol;
+                const int16_t w = self->volumeViewport->x1 - self->volumeViewport->x0;
+                const int16_t h = self->volumeViewport->y1 - self->volumeViewport->y0;
+                const int16_t vol = (displayVolAcc / displayVolumeSampleCount) >> self->volumeViewport->displayFactor;
+                const int16_t vol_y0 = self->volumeViewport->y0 + h - vol;
 
                 if (vol < lastVol && lastVol < h)
                     TFT_fillRect(self->volumeViewport->x0, self->volumeViewport->y0, w, h - lastVol, _bg);
@@ -358,19 +450,62 @@ static void recordingTask(void *self_in)
                         self->volumeViewport->y1 - vol_y0, self->volumeViewport->color);
 
                 lastVol = vol;
-                volAcc = 0;
+                displayVolAcc = 0;
             }
 
         }
 
         //ESP_LOGD("AUDIO", "recordingTask:bytes_read = %zu, wr_ptr = %p, wr_size = %zu, avr = %d", bytes_read, wr_ptr, wr_size, avr);
 
-        wr_ptr += bytes_read;
-        wr_size -= bytes_read;
+        // Calculate volume for current buffer
+
+        const uint32_t vol = volAcc / samples_read;
+
+        // Handle recording start and stop. Take into account silence quota before and after recording
+
+        if ((!recordingStarted) &&  vol < self->threshold){
+            // If recording wasn't started yet, and volume is below threshold, don't start recording.
+            // Make sure we do record some silence before recording starts, up to silence quota
+
+            if (preSilenceQuota > 0){ // record silence at the beginning until quota
+                wr_ptr += bytes_read;
+                wr_size -= bytes_read;
+                preSilenceQuota -= samples_read;
+            } else {
+                // Enough silence was recorded on the beginning.
+                // A new buffer of silence was recorded, so shift it to omit the oldest silence buffer recorded
+                // so we always have the most recent silence quota before wr_ptr
+                memmove(self->data, self->data + bytes_read, wr_ptr - self->data);
+            }
+        } else {
+            // Recording either started, or should be started now.
+
+            if (vol >= self->threshold){
+                // volume is high enough so it's time to start recording (or continue if already started).
+                // reset the post silence quota
+                recordingStarted = true;
+                postSilenceQuota = (self->maxSilence * self->freq) / 1000;
+            } else {
+                // recording started but volume is low again.
+                // decrease post silence quota. If quota is over, stop recording.
+                postSilenceQuota -= samples_read;
+                if (postSilenceQuota <= 0) {
+                    // If recording stopped due to silence, set its length correctly to the actual data recorded.
+                    self->len -= wr_size;
+                    break; // stop recording
+                }
+            }
+
+            wr_ptr += bytes_read;
+            wr_size -= bytes_read;
+        }
+
         iter++;
     }
+
     i2s_adc_disable(I2S_NUM);
-    ESP_LOGD("AUDIO", "i2s_read was called %d times", iter);
+    ESP_LOGD("AUDIO", "i2s_read was called %d times, buffer size is %d bytes. Recording length is %d bytes.", iter, dmaBufSize, self->len);
+    xSemaphoreGive(self->done);
     vTaskDelete(NULL);
 }
 
@@ -386,6 +521,8 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
         ARG_seconds,
 
         ARG_alpha,
+        ARG_threshold,
+        ARG_maxSilence,
 
         ARG_display,
         ARG_waveViewport,
@@ -398,6 +535,8 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
         { MP_QSTR_seconds, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = 10}},
 
         { MP_QSTR_alpha, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 1UL<<ALPHA_SHIFT}},
+        { MP_QSTR_threshold, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0}},
+        { MP_QSTR_maxSilence, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 1000}},
 
         { MP_QSTR_display, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_obj = NULL}},
         { MP_QSTR_waveViewport, MP_ARG_KW_ONLY | MP_ARG_OBJ, {.u_obj = NULL}},
@@ -419,18 +558,23 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	}
 
 	self->alpha = args[ARG_alpha].u_int;
+	self->threshold = args[ARG_threshold].u_int;
+	self->maxSilence = args[ARG_maxSilence].u_int;
 
 	self->display =  args[ARG_display].u_obj;
+	if (self->display == mp_const_none) self->display = NULL;
 	if (self->display) {
 	    if (TFT_setupDevice(self->display)) {
 	        mp_raise_msg(&mp_type_Exception, "Display needs to be initialized first!");
 	    }
 	}
 	self->waveViewport = args[ARG_waveViewport].u_obj;
+	if (self->waveViewport == mp_const_none) self->waveViewport = NULL;
 	if (self->waveViewport && !self->display) {
 	    mp_raise_msg(&mp_type_Exception, "Cannot set waveViewport without setting display!");
 	}
 	self->volumeViewport = args[ARG_volumeViewport].u_obj;
+	if (self->volumeViewport == mp_const_none) self->volumeViewport = NULL;
     if (self->volumeViewport && !self->display) {
         mp_raise_msg(&mp_type_Exception, "Cannot set volumeViewport without setting display!");
     }
@@ -452,6 +596,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
     //init ADC pad
     i2s_set_adc_mode(I2S_ADC_UNIT, args[ARG_channel].u_int);
 
+    self->done = xSemaphoreCreateBinary();
     self->recordingTask = NULL;
     BaseType_t xReturned = xTaskCreate(recordingTask, "Recording Task", RECORDING_TASK_STACK_SIZE, self, RECORDING_TASK_PRIORITY, &self->recordingTask);
     if (xReturned != pdPASS){
@@ -466,6 +611,7 @@ STATIC mp_obj_t audio_recording_close(mp_obj_t self_in) {
     audio_recording_t *self = self_in;
     i2s_driver_uninstall(I2S_NUM);
     if (self->data){
+        vSemaphoreDelete(self->done);
         m_free(self->data);
         self->data = NULL;
     }
