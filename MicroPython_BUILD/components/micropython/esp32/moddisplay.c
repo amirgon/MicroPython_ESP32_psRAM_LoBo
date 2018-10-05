@@ -44,8 +44,6 @@
 #include "modmachine.h"
 
 
-const mp_obj_type_t display_tft_type;
-
 uint8_t disp_used_spi_host = 0;
 
 static const char* const display_types[] = { "ILI9341", "ILI9488", "ST7789V",

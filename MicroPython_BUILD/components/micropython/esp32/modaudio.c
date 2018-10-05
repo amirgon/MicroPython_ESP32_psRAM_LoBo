@@ -34,9 +34,14 @@
 #include "driver/i2s.h"
 #include "driver/adc.h"
 #include "moddisplay.h"
+#include "esp_heap_caps.h"
 
-#define RECORDING_TASK_PRIORITY     (CONFIG_MICROPY_TASK_PRIORITY + 1)
+static const char TAG[] = "[AUDIO]";
+
+#define LCD_INIT_TASK_PRIORITY      (CONFIG_MICROPY_TASK_PRIORITY + 2)
+#define RECORDING_TASK_PRIORITY     (31)
 #define RECORDING_TASK_STACK_SIZE   (1024*16)
+#define LCD_INIT_STACK_SIZE         (1024*4)
 #define I2S_NUM                     (I2S_NUM_0)
 #define I2S_ADC_UNIT                (ADC_UNIT_1)
 #define BITS_PER_SAMPLE             (16) // there is an assumption it's 16 bit so we use int16_t to store samples!
@@ -50,6 +55,12 @@
 
 #define ABS(x) ((x)>=0? (x): -(x))
 #define SWAP(type, var1, var2) do { type t = var2; var2 = var1; var1 = t; } while(0)
+
+/*
+ * Globals
+ */
+
+static volatile bool display_initialized = false;
 
 /*
  * Recording Object Definition
@@ -118,14 +129,20 @@ STATIC const mp_obj_type_t viewport_type = {
  */
 
 STATIC mp_obj_t init();
+STATIC mp_obj_t getAutoRecording();
+STATIC mp_obj_t getAutoDisplay();
 
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(init_obj, init);
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(getAutoRecording_obj, getAutoRecording);
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(getAutoDisplay_obj, getAutoDisplay);
 
 STATIC const mp_rom_map_elem_t audio_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR_audio) },
     { MP_OBJ_NEW_QSTR(MP_QSTR___init__), (mp_obj_t)&init_obj},
     { MP_OBJ_NEW_QSTR(MP_QSTR_recording), (mp_obj_t)&audio_recording_type},
     { MP_OBJ_NEW_QSTR(MP_QSTR_viewport), (mp_obj_t)&viewport_type},
+    { MP_OBJ_NEW_QSTR(MP_QSTR_getAutoRecording), (mp_obj_t)&getAutoRecording_obj},
+    { MP_OBJ_NEW_QSTR(MP_QSTR_getAutoDisplay), (mp_obj_t)&getAutoDisplay_obj},
 };
 
 STATIC MP_DEFINE_CONST_DICT (
@@ -239,7 +256,6 @@ typedef struct audio_recording_t {
     TaskHandle_t recordingTask;
     SemaphoreHandle_t done;
 
-    display_tft_obj_t *display;
     viewport_t *waveViewport;
     viewport_t *volumeViewport;
 
@@ -285,6 +301,7 @@ static void recordingTask(void *self_in)
     uint32_t lineZCR = 0;
     bool lineZCR_enable = false;
     uint32_t dmaBufSize = DMA_BUF_SIZE;
+    uint16_t prevProgress = 0;
 
     if (self->waveViewport){
         displayLineRate = self->waveViewport->frameRate * (self->waveViewport->x1 - self->waveViewport->x0 + 1);
@@ -365,7 +382,7 @@ static void recordingTask(void *self_in)
 
                 // Display wave data
 
-                if (self->waveViewport && --samplesToDisplayLine == 0){
+                if (display_initialized && self->waveViewport && --samplesToDisplayLine == 0){
 
                     samplesToDisplayLine = displayLineSampleCount;
 
@@ -382,6 +399,10 @@ static void recordingTask(void *self_in)
 
                     if (x == self->waveViewport->x1) {
                         x = self->waveViewport->x0;
+                        const int16_t progress = ((self->len - wr_size)  * (self->waveViewport->x1 - self->waveViewport->x0)) / self->len;
+                        TFT_fillRect(self->waveViewport->x0 + prevProgress, self->waveViewport->y1-LINE_ZCR_INDICATOR_WIDTH,
+                                progress - prevProgress,LINE_ZCR_INDICATOR_WIDTH, TFT_YELLOW);
+                        prevProgress = progress;
 
                         // Following are attempts to visualize the zero corssing
 /*
@@ -435,7 +456,7 @@ static void recordingTask(void *self_in)
 
             // Display volume data
 
-            if (self->volumeViewport && --samplesToDisplayVolume == 0) {
+            if (display_initialized && self->volumeViewport && --samplesToDisplayVolume == 0) {
                 samplesToDisplayVolume = displayVolumeSampleCount;
 
                 const int16_t w = self->volumeViewport->x1 - self->volumeViewport->x0;
@@ -552,7 +573,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	// set the members
 	self->freq = args[ARG_freq].u_int;
 	self->len = self->freq * args[ARG_seconds].u_int * BYTES_PER_SAMPLE;
-	self->data = m_malloc(self->len);
+	self->data = heap_caps_malloc(self->len, MALLOC_CAP_DEFAULT);
 	if (!self->data){
 	    mp_raise_msg(&mp_type_Exception, "Memory allocation failed!");
 	}
@@ -561,21 +582,21 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	self->threshold = args[ARG_threshold].u_int;
 	self->maxSilence = args[ARG_maxSilence].u_int;
 
-	self->display =  args[ARG_display].u_obj;
-	if (self->display == mp_const_none) self->display = NULL;
-	if (self->display) {
-	    if (TFT_setupDevice(self->display)) {
+	display_tft_obj_t *display = args[ARG_display].u_obj;
+	if (display == mp_const_none) display = NULL;
+	if (display) {
+	    if (TFT_setupDevice(display)) {
 	        mp_raise_msg(&mp_type_Exception, "Display needs to be initialized first!");
 	    }
 	}
 	self->waveViewport = args[ARG_waveViewport].u_obj;
 	if (self->waveViewport == mp_const_none) self->waveViewport = NULL;
-	if (self->waveViewport && !self->display) {
+	if (self->waveViewport && !display) {
 	    mp_raise_msg(&mp_type_Exception, "Cannot set waveViewport without setting display!");
 	}
 	self->volumeViewport = args[ARG_volumeViewport].u_obj;
 	if (self->volumeViewport == mp_const_none) self->volumeViewport = NULL;
-    if (self->volumeViewport && !self->display) {
+    if (self->volumeViewport && !display) {
         mp_raise_msg(&mp_type_Exception, "Cannot set volumeViewport without setting display!");
     }
 
@@ -612,7 +633,7 @@ STATIC mp_obj_t audio_recording_close(mp_obj_t self_in) {
     i2s_driver_uninstall(I2S_NUM);
     if (self->data){
         vSemaphoreDelete(self->done);
-        m_free(self->data);
+        heap_caps_free(self->data);
         self->data = NULL;
     }
     return mp_const_none;
@@ -627,20 +648,216 @@ STATIC void recording_print( const mp_print_t *print,
     // print the object
 	if (self->data){
 	    mp_printf (print, "recording(freq=%u, len=%u", self->freq, self->len);
-	    if (self->display){
-	        mp_printf (print, ", display=true");
-	        if (self->waveViewport){
-                mp_printf (print, ", waveViewport=");
-                viewport_print(print, self->waveViewport, kind);
-	        }
-	        if (self->volumeViewport){
-                mp_printf (print, ", volumeViewport=");
-                viewport_print(print, self->volumeViewport, kind);
-	        }
-	    }
+
+        if (self->waveViewport){
+            mp_printf (print, ", waveViewport=");
+            viewport_print(print, self->waveViewport, kind);
+        }
+        if (self->volumeViewport){
+            mp_printf (print, ", volumeViewport=");
+            viewport_print(print, self->volumeViewport, kind);
+        }
+
 	    mp_printf (print, ")");
 	} else {
 	    mp_printf (print, "recording(closed)");
 	}
 }
 
+/*
+ * Startup code which automatically starts display and recording as fast as possible.
+ * This is done before spiram is initialized since initialization takes some time.
+ * After MP is up, it can access the already active display and recording that were
+ * automatically started with "getAutoRecording" and "getAutoDispay" functions.
+ */
+
+static display_tft_obj_t autoDisplay = {
+    .base = {.type = &display_tft_type},
+    .spi = NULL,
+    .dconfig = {
+            .speed = 4000000,
+            .rdspeed = 4000000,
+            .type = DISP_TYPE_ILI9341,
+            .host = HSPI_HOST,
+            .miso = 19,
+            .mosi = 18,
+            .sck = 5,
+            .cs = 13,
+            .dc = 33,
+            .tcs = -1,
+            .rst = 4,
+            .bckl = -1,
+            .bckl_on = -1,
+            .color_bits = 24,
+            .gamma = 0,
+            .width = DEFAULT_TFT_DISPLAY_WIDTH,
+            .height = DEFAULT_TFT_DISPLAY_HEIGHT,
+            .invrot = 0,
+            .bgr = 0,
+            .touch = TOUCH_TYPE_NONE
+    },
+    .disp_spi_dev = {
+            .handle = NULL,
+            .cs = -1,
+            .dc = -1,
+            .selected = 0
+    },
+    .ts_spi_dev = {
+            .handle = NULL,
+            .cs = -1,
+            .dc = -1,
+            .selected = 0
+    },
+    .disp_spi = &autoDisplay.disp_spi_dev,
+    .ts_spi = &autoDisplay.ts_spi_dev
+};
+
+static void lcdInitTask(void *params)
+{
+    esp_err_t ret;
+
+    // ================================
+    // ==== Initialize the Display ====
+
+    esp_log_level_set("[TFTSPI]", ESP_LOG_VERBOSE);
+
+    disp_spi = autoDisplay.disp_spi;
+    ts_spi = autoDisplay.ts_spi;
+
+    ret = TFT_display_init(&autoDisplay.dconfig);
+    if (ret != ESP_OK) {
+           mp_raise_msg(&mp_type_OSError, "Error initializing display");
+    }
+
+    autoDisplay.dconfig.speed = spi_set_speed(disp_spi, autoDisplay.dconfig.speed);
+    max_rdclock = find_rd_speed();
+    autoDisplay.dconfig.rdspeed = max_rdclock;
+
+    font_rotate = 0;
+    text_wrap = 0;
+    font_transparent = 0;
+    font_forceFixed = 0;
+    gray_scale = 0;
+    TFT_setRotation(PORTRAIT);
+    TFT_setGammaCurve(0);
+    TFT_setFont(DEFAULT_FONT, NULL);
+    TFT_resetclipwin();
+    _fg = intToColor(iTFT_GREEN);
+    bcklOn(&autoDisplay.dconfig);
+    // TFT_print("ZTL", CENTER, (_height/2));
+    display_initialized = true;
+    vTaskDelete(NULL);
+}
+
+STATIC mp_obj_t getAutoDisplay(void)
+{
+    display_tft_obj_t *self = m_new_obj(display_tft_obj_t);
+    memcpy(self, &autoDisplay, sizeof(*self));
+    return MP_OBJ_FROM_PTR(self);
+}
+
+static TaskHandle_t lcdInitTaskHandle;
+
+static viewport_t autoWaveViewport = {
+        .base = {.type = &viewport_type},
+        .x0= 70, .y0= 110, .x1 = 170, .y1 = 210,
+        .displayFactor = 5,
+        .color = {255,255,255},
+        .frameRate = 10
+};
+
+static viewport_t autoVolumeVieport = {
+        .base = {.type = &viewport_type},
+        .x0= 175, .y0= 110, .x1 = 200, .y1 = 210,
+        .displayFactor = 2,
+        .color = {255,255,255},
+        .frameRate = 10
+};
+
+static audio_recording_t autoRecording = {
+        .base = {.type = &audio_recording_type},
+        .freq = 16000,
+        .len = 0, // Initialized below to maximum available block
+        .data = NULL, // Initialized below
+        .alpha = 256, // no low pass filter
+        .threshold = 100,
+        .maxSilence = 1000,
+        .recordingTask = NULL, // initialized by xTaskCreate
+        .done = NULL,
+        .waveViewport = &autoWaveViewport,
+        .volumeViewport = &autoVolumeVieport
+    };
+
+STATIC mp_obj_t getAutoRecording(void)
+{
+    audio_recording_t *self = m_new_obj(audio_recording_t);
+    memcpy(self, &autoRecording, sizeof(*self));
+    return MP_OBJ_FROM_PTR(self);
+}
+
+// Called very soon after deepsleep wakeup or reset.
+// spiram is not configured yet! (to save time)
+void startup(void)
+{
+    BaseType_t xReturned;
+
+    // First allocate memory for the recording, in order to allocate the biggest block
+
+    portMUX_TYPE myMutex = portMUX_INITIALIZER_UNLOCKED;
+    taskENTER_CRITICAL(&myMutex);
+    autoRecording.len = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    autoRecording.data = heap_caps_malloc(autoRecording.len, MALLOC_CAP_DEFAULT);
+    taskEXIT_CRITICAL(&myMutex);
+
+    // Start initializing the display
+
+    xReturned = xTaskCreate(lcdInitTask, "LCD init Task", LCD_INIT_STACK_SIZE, NULL, LCD_INIT_TASK_PRIORITY, &lcdInitTaskHandle);
+    if (xReturned != pdPASS){
+        vTaskDelete(lcdInitTaskHandle);
+        ESP_LOGE(TAG, "Failed creating Auto Recording task!");
+    }
+
+    // Power audio
+
+    gpio_set_direction(23, GPIO_MODE_OUTPUT);
+    gpio_set_level(23, 1);
+
+    // Start recording
+
+    if (autoRecording.data == NULL){
+        ESP_LOGE(TAG, "Failed allocating %d bytes for Auto Recording!", autoRecording.len);
+    } else {
+        ESP_LOGI(TAG, "Allocated %d bytes for Auto Recording (%d ms)", autoRecording.len, (1000*autoRecording.len) / (autoRecording.freq * BYTES_PER_SAMPLE));
+        i2s_config_t i2s_config = {
+            .mode = I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN,
+            .sample_rate =  autoRecording.freq,
+            .bits_per_sample = BITS_PER_SAMPLE,
+            .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+            .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+            .intr_alloc_flags = 0,
+            .dma_buf_count = 2,
+            .dma_buf_len = DMA_BUF_SIZE
+        };
+        //install and start i2s driver
+        i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+        //init DAC pad
+        i2s_set_dac_mode(I2S_DAC_CHANNEL_BOTH_EN);
+        //init ADC pad
+        i2s_set_adc_mode(I2S_ADC_UNIT, ADC1_CHANNEL_0);
+
+        autoRecording.done = xSemaphoreCreateBinary();
+
+        // Turn on "recording" led
+        gpio_set_direction(21, GPIO_MODE_OUTPUT);
+        gpio_set_level(21, 1);
+
+        xReturned = xTaskCreate(recordingTask, "Auto Recording Task", RECORDING_TASK_STACK_SIZE, &autoRecording, RECORDING_TASK_PRIORITY, &autoRecording.recordingTask);
+        if (xReturned != pdPASS){
+            vTaskDelete(autoRecording.recordingTask);
+            ESP_LOGE(TAG, "Failed creating Auto Recording task!");
+        }
+
+        xSemaphoreTake(autoRecording.done, portMAX_DELAY);
+        //vTaskDelay(10 / portTICK_RATE_MS);
+    }
+}

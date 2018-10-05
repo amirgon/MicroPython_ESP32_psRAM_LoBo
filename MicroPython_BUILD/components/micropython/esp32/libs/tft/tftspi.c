@@ -1165,24 +1165,30 @@ void TFT_display_setvars(display_config_t *dconfig)
 // ==================================================
 esp_err_t TFT_display_init(display_config_t *dconfig)
 {
+    ESP_LOGI(TAG, "TFT_display_init started");
+
     esp_err_t ret;
     TFT_PinsInit(dconfig);
     ret = TFT_spiInit(dconfig);
     if (ret != ESP_OK) return ret;
+
+    ESP_LOGI(TAG, "Pins initialized");
 
     TFT_display_setvars(dconfig);
 
     if (dconfig->rst >= 0) {
         //Reset the display
         gpio_set_level(dconfig->rst, 0);
-        vTaskDelay(20 / portTICK_RATE_MS);
+        vTaskDelay(10 / portTICK_RATE_MS);
         gpio_set_level(dconfig->rst, 1);
-        vTaskDelay(150 / portTICK_RATE_MS);
+        vTaskDelay(120 / portTICK_RATE_MS);
     }
     else {
         disp_spi_transfer_cmd_data(TFT_CMD_SWRESET, NULL, 0);
         vTaskDelay(200 / portTICK_RATE_MS);
     }
+
+    ESP_LOGI(TAG, "reset completed");
 
     disp_select();
 
@@ -1232,14 +1238,20 @@ esp_err_t TFT_display_init(display_config_t *dconfig)
 
     disp_deselect();
 
+    ESP_LOGI(TAG, "init command list sent");
+
     // Clear screen
     _tft_setRotation(PORTRAIT);
-    TFT_pushColorRep(0, 0, _width-1, _height-1, (color_t){0,0,0}, (uint32_t)(_height*_width));
+    //TFT_pushColorRep(0, 0, _width-1, _height-1, (color_t){0,0,0}, (uint32_t)(_height*_width));
+
+    //ESP_LOGI(TAG, "screen cleaned");
 
     ///Enable backlight
     if (dconfig->bckl >= 0) {
         gpio_set_level(dconfig->bckl, dconfig->bckl_on);
     }
+
+    ESP_LOGI(TAG, "TFT_display_init completed");
     return ESP_OK;
 }
 

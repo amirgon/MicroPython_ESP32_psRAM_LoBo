@@ -24,7 +24,7 @@ patches/
 
 qstrdefs.generated.h
 /partitions_mpy.csv
-/sdkconfig
+# /sdkconfig
 sdkconfig.old
 _sdkconfig.saved
 sdkconfig.fw_esp32

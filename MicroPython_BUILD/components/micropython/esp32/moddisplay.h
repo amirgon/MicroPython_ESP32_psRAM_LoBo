@@ -9,6 +9,7 @@
 #include "tft/tftspi.h"
 #include "tft/tft.h"
 
+const mp_obj_type_t display_tft_type;
 
 typedef struct _display_tft_obj_t {
     mp_obj_base_t base;
@@ -21,7 +22,6 @@ typedef struct _display_tft_obj_t {
     uint32_t tp_calx;
     uint32_t tp_caly;
 } display_tft_obj_t;
-
 
 /*
  * tftspi.c low level driver uses some global variables
