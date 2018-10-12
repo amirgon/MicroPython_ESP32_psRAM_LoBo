@@ -35,6 +35,7 @@
 #include "driver/adc.h"
 #include "moddisplay.h"
 #include "esp_heap_caps.h"
+#include "soc/rtc_cntl_reg.h"
 
 static const char TAG[] = "[AUDIO]";
 
@@ -683,7 +684,7 @@ static display_tft_obj_t autoDisplay = {
             .mosi = 18,
             .sck = 5,
             .cs = 13,
-            .dc = 33,
+            .dc = 15,
             .tcs = -1,
             .rst = 4,
             .bckl = -1,
@@ -859,5 +860,13 @@ void startup(void)
 
         xSemaphoreTake(autoRecording.done, portMAX_DELAY);
         //vTaskDelay(10 / portTICK_RATE_MS);
+
+        //ESP_LOGI(TAG, "Before RTC_CNTL_DG_PAD_FORCE_HOLD");
+        //taskENTER_CRITICAL(&myMutex);
+        //esp_sleep_enable_ext0_wakeup(27, 1);
+        //SET_PERI_REG_MASK(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_DG_PAD_FORCE_HOLD);
+        //esp_deep_sleep_start();
+        //taskEXIT_CRITICAL(&myMutex);
+        //ESP_LOGI(TAG, "After RTC_CNTL_DG_PAD_FORCE_HOLD");
     }
 }
