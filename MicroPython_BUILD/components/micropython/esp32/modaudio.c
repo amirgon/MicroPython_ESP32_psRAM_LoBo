@@ -54,6 +54,13 @@ static const char TAG[] = "[AUDIO]";
 #define DEFAULT_FRAMERATE           25
 #define LINE_ZCR_INDICATOR_WIDTH    5
 
+// PINS
+
+#define GPIO_TOUCH_RAIL         27 // REVERSED LOGIC! 1 means touch rail is disabled
+#define GPIO_TOUCH_RAIL_ENABLE  0
+#define GPIO_TOUCH_RAIL_DISABLE 1
+#define GPIO_TOUCH              33
+
 #define ABS(x) ((x)>=0? (x): -(x))
 #define SWAP(type, var1, var2) do { type t = var2; var2 = var1; var1 = t; } while(0)
 
@@ -70,9 +77,11 @@ static volatile bool display_initialized = false;
 STATIC mp_obj_t audio_recording_close(mp_obj_t self_in);
 STATIC mp_obj_t audio_recording_data(mp_obj_t self_in);
 STATIC mp_obj_t audio_recording_wait(mp_obj_t self_in);
+STATIC mp_obj_t audio_recording_aborted(mp_obj_t self_in);
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_close_obj, audio_recording_close);
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_data_obj, audio_recording_data);
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_wait_obj, audio_recording_wait);
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(audio_recording_aborted_obj, audio_recording_aborted);
 
 
 STATIC const mp_rom_map_elem_t recording_locals_dict_table[] = {
@@ -80,6 +89,7 @@ STATIC const mp_rom_map_elem_t recording_locals_dict_table[] = {
         {MP_OBJ_NEW_QSTR(MP_QSTR___del__), (mp_obj_t)&audio_recording_close_obj},
         {MP_OBJ_NEW_QSTR(MP_QSTR_data), (mp_obj_t)&audio_recording_data_obj},
         {MP_OBJ_NEW_QSTR(MP_QSTR_wait), (mp_obj_t)&audio_recording_wait_obj},
+        {MP_OBJ_NEW_QSTR(MP_QSTR_aborted), (mp_obj_t)&audio_recording_aborted_obj},
 };
 STATIC MP_DEFINE_CONST_DICT(recording_locals_dict, recording_locals_dict_table);
 
@@ -256,6 +266,7 @@ typedef struct audio_recording_t {
     uint32_t maxSilence; // Number of milliseconds of silence before cutting recording
     TaskHandle_t recordingTask;
     SemaphoreHandle_t done;
+    bool aborted; // OUT: whether recording was aborted
 
     viewport_t *waveViewport;
     viewport_t *volumeViewport;
@@ -278,9 +289,17 @@ STATIC mp_obj_t audio_recording_wait(mp_obj_t self_in)
     return mp_const_none;
 }
 
+STATIC mp_obj_t audio_recording_aborted(mp_obj_t self_in)
+{
+    audio_recording_t *self = self_in;
+    return self->aborted? mp_const_true: mp_const_false;
+}
+
+
 static void recordingTask(void *self_in)
 {
     audio_recording_t *self = self_in;
+    self->aborted = false;
     size_t wr_size = self->len;
     void *wr_ptr = self->data;
     size_t bytes_read;
@@ -321,9 +340,32 @@ static void recordingTask(void *self_in)
     int32_t preSilenceQuota = (self->maxSilence * self->freq) / 1000;
     bool recordingStarted = false;
 
+    static const gpio_config_t config_touch_rail = {
+        .pin_bit_mask = 1ULL << GPIO_TOUCH_RAIL,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&config_touch_rail);
+    gpio_set_level(GPIO_MODE_OUTPUT, GPIO_TOUCH_RAIL_ENABLE);
+
+    static const gpio_config_t config_touch = {
+        .pin_bit_mask = 1ULL << GPIO_TOUCH,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&config_touch);
+
     i2s_adc_enable(I2S_NUM);
 
     while (wr_size > 0) {
+        if (gpio_get_level(GPIO_TOUCH)){
+            self->aborted = true;
+            break;
+        }
         esp_task_wdt_reset();
 
         //read data from I2S bus, in this case, from ADC.
@@ -649,7 +691,7 @@ STATIC void recording_print( const mp_print_t *print,
     // print the object
 	if (self->data){
 	    mp_printf (print, "recording(freq=%u, len=%u", self->freq, self->len);
-
+	    if (self->aborted) mp_printf (print, ", ABORTED!");
         if (self->waveViewport){
             mp_printf (print, ", waveViewport=");
             viewport_print(print, self->waveViewport, kind);
