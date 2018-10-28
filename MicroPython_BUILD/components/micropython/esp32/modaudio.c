@@ -264,6 +264,7 @@ typedef struct audio_recording_t {
     uint32_t alpha; // alpha scaled up ^ ALPHA_SHIFT, for low pass filter.
     uint32_t threshold; // minimum volume threshold
     uint32_t maxSilence; // Number of milliseconds of silence before cutting recording
+    uint32_t delay; // Number of milliseconds to wait before starting to record
     TaskHandle_t recordingTask;
     SemaphoreHandle_t done;
     bool aborted; // OUT: whether recording was aborted
@@ -359,6 +360,7 @@ static void recordingTask(void *self_in)
     };
     gpio_config(&config_touch);
 
+    if (self->delay>0) vTaskDelay(self->delay / portTICK_RATE_MS);
     i2s_adc_enable(I2S_NUM);
 
     while (wr_size > 0) {
@@ -614,6 +616,7 @@ STATIC mp_obj_t recording_make_new(const mp_obj_type_t *type,
 	// give it a type
 	self->base.type = &audio_recording_type;
 	// set the members
+	self->delay = 0;
 	self->freq = args[ARG_freq].u_int;
 	self->len = self->freq * args[ARG_seconds].u_int * BYTES_PER_SAMPLE;
 	self->data = heap_caps_malloc(self->len, MALLOC_CAP_DEFAULT);
@@ -819,6 +822,7 @@ static viewport_t autoVolumeVieport = {
 
 static audio_recording_t autoRecording = {
         .base = {.type = &audio_recording_type},
+        .delay = 100, // wait 100ms before starting to record, to let opamp stabilize
         .freq = 16000,
         .len = 0, // Initialized below to maximum available block
         .data = NULL, // Initialized below
@@ -844,6 +848,11 @@ void startup(void)
 {
     BaseType_t xReturned;
 
+    // Power audio. We will need to wait for it to stabilize, so do it first thing.
+
+    gpio_set_direction(23, GPIO_MODE_OUTPUT);
+    gpio_set_level(23, 1);
+
     // First allocate memory for the recording, in order to allocate the biggest block
 
     portMUX_TYPE myMutex = portMUX_INITIALIZER_UNLOCKED;
@@ -859,11 +868,6 @@ void startup(void)
         vTaskDelete(lcdInitTaskHandle);
         ESP_LOGE(TAG, "Failed creating Auto Recording task!");
     }
-
-    // Power audio
-
-    gpio_set_direction(23, GPIO_MODE_OUTPUT);
-    gpio_set_level(23, 1);
 
     // Start recording
 
