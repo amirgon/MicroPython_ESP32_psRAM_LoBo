@@ -725,9 +725,9 @@ static display_tft_obj_t autoDisplay = {
             .rdspeed = 4000000,
             .type = DISP_TYPE_ILI9341,
             .host = HSPI_HOST,
-            .miso = 19,
+            .miso = 5,
             .mosi = 18,
-            .sck = 5,
+            .sck = 19,
             .cs = 13,
             .dc = 12,
             .tcs = -1,
@@ -766,6 +766,15 @@ static void lcdInitTask(void *params)
     // ==== Initialize the Display ====
 
     esp_log_level_set("[TFTSPI]", ESP_LOG_VERBOSE);
+
+    // Power the display
+
+    gpio_set_direction(15, GPIO_MODE_OUTPUT);
+    gpio_set_level(15, 1);
+
+    // Wait for power to stabilize
+
+    vTaskDelay(5 / portTICK_RATE_MS);
 
     disp_spi = autoDisplay.disp_spi;
     ts_spi = autoDisplay.ts_spi;
@@ -850,8 +859,8 @@ void startup(void)
 
     // Power audio. We will need to wait for it to stabilize, so do it first thing.
 
-    gpio_set_direction(23, GPIO_MODE_OUTPUT);
-    gpio_set_level(23, 1);
+    gpio_set_direction(22, GPIO_MODE_OUTPUT);
+    gpio_set_level(22, 1);
 
     // First allocate memory for the recording, in order to allocate the biggest block
 

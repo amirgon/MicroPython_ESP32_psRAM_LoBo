@@ -359,7 +359,7 @@ static const uint8_t ILI9341_init[] = {
   TFT_CMD_GMCTRN1, 15,   							//Negative Gamma Correction
   0x00, 0x0E, 0x14, 0x03, 0x11, 0x07, 0x31, 0xC1, 0x48, 0x08, 0x0F, 0x0C, 0x31, 0x36, 0x0F,
   TFT_CMD_SLPOUT, TFT_CMD_DELAY,					//  Sleep out
-  120,			 									//  120 ms delay
+  200,			 									//  120 ms delay
   TFT_DISPON, TFT_CMD_DELAY, 1,
 };
 
