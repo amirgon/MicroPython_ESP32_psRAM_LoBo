@@ -220,6 +220,11 @@ ifdef CONFIG_MICROPY_USE_AUDIO
 SRC_C += esp32/modaudio.c
 endif
 
+ifdef CONFIG_MICROPY_USE_LVGL
+SRC_C += esp32/modlvgl.c
+endif
+
+
 EXTMOD_SRC_C = $(addprefix extmod/,\
 	modbtree.c \
 	)

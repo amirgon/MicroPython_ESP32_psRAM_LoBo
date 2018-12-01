@@ -1,0 +1,3 @@
+[submodule "MicroPython_BUILD/components/lvgl"]
+	path = MicroPython_BUILD/components/liblvgl/lvgl
+	url = https://github.com/amirgon/lvgl.git

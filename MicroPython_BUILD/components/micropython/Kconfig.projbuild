@@ -321,6 +321,12 @@ menu "MicroPython"
 	    	default n
 	    	help
 	    	Include Audio module into build 
+	    	
+	    config MICROPY_USE_LVGL
+	       bool "Use LVGL module"
+	       default n
+	       help
+	       Include LittlevGL Embedded GUI Library
 	
 	    config MICROPY_USE_EVE
 	        bool "Use EVE display module (experimental, do not enable)"

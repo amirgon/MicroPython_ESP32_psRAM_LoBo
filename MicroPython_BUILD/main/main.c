@@ -60,7 +60,7 @@ static const char* TAG = "app_main_start";
 //===================
 void app_main(void) {
 
-    startup();
+    //startup();
 
     // If spiram was not configured during boot time, configure it now
 

@@ -331,6 +331,14 @@ extern const struct _mp_obj_module_t mp_module_audio;
 #define BUILTIN_MODULE_AUDIO
 #endif
 
+#ifdef CONFIG_MICROPY_USE_LVGL
+extern const struct _mp_obj_module_t mp_module_lvgl;
+#define BUILTIN_MODULE_LVGL { MP_OBJ_NEW_QSTR(MP_QSTR_lvgl), (mp_obj_t)&mp_module_lvgl },
+#else
+#define BUILTIN_MODULE_LVGL
+#endif
+
+
 #define MICROPY_PORT_BUILTIN_MODULES \
     { MP_OBJ_NEW_QSTR(MP_QSTR_utime),    (mp_obj_t)&utime_module }, \
     { MP_OBJ_NEW_QSTR(MP_QSTR_uos),      (mp_obj_t)&uos_module }, \
@@ -346,6 +354,7 @@ extern const struct _mp_obj_module_t mp_module_audio;
 	BUILTIN_MODULE_OTA \
 	BUILTIN_MODULE_BLUETOOTH \
 	BUILTIN_MODULE_AUDIO \
+	BUILTIN_MODULE_LVGL
 
 #define MICROPY_PORT_BUILTIN_MODULE_WEAK_LINKS \
     { MP_OBJ_NEW_QSTR(MP_QSTR_binascii), (mp_obj_t)&mp_module_ubinascii }, \
