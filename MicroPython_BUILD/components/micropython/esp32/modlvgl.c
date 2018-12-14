@@ -9,8 +9,8 @@
 
 
 #include "py/obj.h"
+#include "py/runtime.h"
 #include "../../liblvgl/lvgl/lvgl.h"
-
 #include "../../liblvgl/drv/ili9341.h"
 #include "../../liblvgl/drv/disp_spi.h"
 #include "../../liblvgl/drv/resistive_touch.h"
@@ -25,19 +25,28 @@
 
 static const char TAG[] = "[LVGL]";
 
-static void lv_tick_task(void)
+STATIC mp_obj_t mp_lv_task_handler(mp_obj_t arg)
 {
-    lv_tick_inc(portTICK_RATE_MS);
+    lv_task_handler();
+    return mp_const_none;
 }
+
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(mp_lv_task_handler_obj, mp_lv_task_handler);
 
 static void lv_task(void* param)
 {
     while(1)
     {
         vTaskDelay(5);
-        lv_task_handler();
+        mp_sched_schedule((mp_obj_t)&mp_lv_task_handler_obj, mp_const_none, NULL);
     }
 }
+
+static void lv_tick_task(void)
+{
+    lv_tick_inc(portTICK_RATE_MS);
+}
+
 
 static lv_disp_drv_t disp_drv;
 static lv_disp_t *disp;
