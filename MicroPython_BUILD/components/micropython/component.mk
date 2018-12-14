@@ -222,6 +222,7 @@ endif
 
 ifdef CONFIG_MICROPY_USE_LVGL
 SRC_C += esp32/modlvgl.c
+SRC_C += $(PROJECT_PATH)/components/liblvgl/lvgl/micropython/lv_mpy.c
 endif
 
 
@@ -301,9 +302,9 @@ OBJ_MP += $(addprefix $(BUILD)/, $(LIBS_SRC_C:.c=.o))
 
 # List of sources for qstr extraction
 # ------------------------------------------------------------------------------
-SRC_QSTR += $(SRC_C) $(EXTMOD_SRC_C) $(LIB_SRC_C) $(DRIVERS_SRC_C) $(LIBS_SRC_C)
+SRC_QSTR += $(SRC_C) $(EXTMOD_SRC_C) $(LIB_SRC_C) $(DRIVERS_SRC_C) $(LIBS_SRC_C) 
 # Append any auto-generated sources that are needed by sources listed in SRC_QSTR
-SRC_QSTR_AUTO_DEPS +=
+SRC_QSTR_AUTO_DEPS += 
 
 # Needed to generate Qstr
 OBJ = $(OBJ_MP) $(OBJ_ESPIDF)
