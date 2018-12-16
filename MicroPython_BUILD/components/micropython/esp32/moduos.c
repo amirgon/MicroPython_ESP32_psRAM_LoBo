@@ -34,6 +34,7 @@
 
 #include "esp_system.h"
 #include "esp_log.h"
+#include "driver/spi_common.h"
 
 #include "py/mpconfig.h"
 #include "py/obj.h"
@@ -140,11 +141,13 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_0(os_umount_sdcard_obj, os_umount_sdcard);
 STATIC mp_obj_t os_sdcard_config(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args)
 {
     const mp_arg_t allowed_args[] = {
-        { MP_QSTR_mode, MP_ARG_REQUIRED | MP_ARG_INT, { .u_int = 0 } },
-        { MP_QSTR_clk,                    MP_ARG_OBJ, { .u_obj = mp_const_none } },
-        { MP_QSTR_mosi,                   MP_ARG_OBJ, { .u_obj = mp_const_none } },
-        { MP_QSTR_miso,                   MP_ARG_OBJ, { .u_obj = mp_const_none } },
-        { MP_QSTR_cs,                     MP_ARG_OBJ, { .u_obj = mp_const_none } },
+        { MP_QSTR_mode, MP_ARG_REQUIRED | MP_ARG_INT,  { .u_int = 0 } },
+        { MP_QSTR_clk,                    MP_ARG_OBJ,  { .u_obj = mp_const_none } },
+        { MP_QSTR_mosi,                   MP_ARG_OBJ,  { .u_obj = mp_const_none } },
+        { MP_QSTR_miso,                   MP_ARG_OBJ,  { .u_obj = mp_const_none } },
+        { MP_QSTR_cs,                     MP_ARG_OBJ,  { .u_obj = mp_const_none } },
+        { MP_QSTR_maxspeed,               MP_ARG_INT,  { .u_int = -1 } },
+        { MP_QSTR_spihost,                MP_ARG_INT,  { .u_int = VSPI_HOST } },
     };
 
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
@@ -152,7 +155,7 @@ STATIC mp_obj_t os_sdcard_config(size_t n_args, const mp_obj_t *pos_args, mp_map
 
     int mode = args[0].u_int;
     if ((mode < 1) || (mode > 3)) {
-        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "Unsupported sdcard mode"));
+        mp_raise_ValueError("Unsupported sdcard mode");
     }
     if (mode == 1) {
     	int clk = machine_pin_get_gpio(args[1].u_obj);
@@ -166,10 +169,24 @@ STATIC mp_obj_t os_sdcard_config(size_t n_args, const mp_obj_t *pos_args, mp_map
     	sdcard_config.miso = miso;
     	sdcard_config.cs = cs;
     	sdcard_config.mode = mode;
+        if ((args[6].u_int != HSPI_HOST) && (args[6].u_int != VSPI_HOST)) {
+            mp_raise_ValueError("Unsupported SPI hots (1 (HSPI) or 2 (VSPI) allowed)");
+        }
+        sdcard_config.host = args[6].u_int;
     }
     else {
         if (native_vfs_mounted[VFS_NATIVE_TYPE_SDCARD]) os_umount_sdcard();
     	sdcard_config.mode = mode;
+        sdcard_config.host = 1;
+    }
+    if (args[5].u_int >= 0) {
+        if ((args[5].u_int == 400) || ((args[5].u_int >= 8) && (args[5].u_int <= 40))) {
+            if (args[5].u_int == 400) sdcard_config.max_speed = 400;
+            else sdcard_config.max_speed = args[5].u_int * 1000;
+        }
+        else {
+            mp_raise_ValueError("Unsupported max speed (8 - 40 MHz allowed)");
+        }
     }
 
 	return mp_const_none;

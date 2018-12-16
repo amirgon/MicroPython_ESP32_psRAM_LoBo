@@ -36,6 +36,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_task_wdt.h"
 #include "rom/ets_sys.h"
 #include "rom/rtc.h"
 #include "rom/gpio.h"
@@ -78,7 +79,6 @@ bool mpy_use_spiram = false;
 nvs_handle mpy_nvs_handle = 0;
 machine_rtc_config_t RTC_DATA_ATTR machine_rtc_config = {0};
 bool i2s_driver_installed = false;
-int mpy_repl_stack_size = CONFIG_MICROPY_STACK_SIZE * 1024;
 int mpy_heap_size = CONFIG_MICROPY_HEAP_SIZE * 1024;
 int MPY_DEFAULT_STACK_SIZE = 16*1024;
 int MPY_MAX_STACK_SIZE = 32*1024;
@@ -297,6 +297,7 @@ void prepareSleepReset(uint8_t hrst, char *msg)
 
     if (!hrst) {
         if (msg) mp_hal_stdout_tx_str(msg);
+        /*
         // stop and deinitialize WiFi
         if (wifi_network_state == WIFI_STATE_STARTED) {
             wifi_network_state = WIFI_STATE_STOPPED;
@@ -308,6 +309,7 @@ void prepareSleepReset(uint8_t hrst, char *msg)
             esp_wifi_stop();
             esp_wifi_deinit();
         }
+        */
         // deinitialise peripherals
         //ToDo: deinitialize other peripherals, threads, services, ...
         machine_pins_deinit();
@@ -452,8 +454,8 @@ STATIC mp_obj_t machine_deepsleep(size_t n_args, const mp_obj_t *pos_args, mp_ma
     uint32_t s_rtc_clk_cal = (uint64_t)REG_READ(RTC_SLOW_CLK_CAL_REG);
     stub_timeout = (uint64_t)(2000000) * (1 << RTC_CLK_CAL_FRACT) / s_rtc_clk_cal;
 
-    mp_int_t stub_sleep = 0;
-    mp_int_t sleep_time = args[ARG_sleep_ms].u_int;
+    int64_t stub_sleep = 0;
+    int64_t sleep_time = args[ARG_sleep_ms].u_int;
     if (sleep_time < 0) sleep_time = 0;
     if (sleep_time > 0) {
         stub_sleep = args[ARG_stub_ms].u_int;
@@ -470,7 +472,7 @@ STATIC mp_obj_t machine_deepsleep(size_t n_args, const mp_obj_t *pos_args, mp_ma
     if (stub_sleep > 0) {
         wait_in_stub = (int64_t)args[ARG_stub_wait].u_int;
         if (wait_in_stub < 0) wait_in_stub = 0;
-        if (wait_in_stub > (stub_sleep*1000)) wait_in_stub = (int64_t)stub_sleep*1000;
+        if (wait_in_stub > (stub_sleep*1000)) wait_in_stub = stub_sleep*1000;
         machine_rtc_config.stub_wait = wait_in_stub;
         stub_timer_inc = 1;
         if (wait_in_stub > 100000) stub_timer_inc = 100;
@@ -478,8 +480,8 @@ STATIC mp_obj_t machine_deepsleep(size_t n_args, const mp_obj_t *pos_args, mp_ma
     }
 
     if (sleep_time > 0) {
-        if (stub_sleep) esp_sleep_enable_timer_wakeup((uint64_t)(stub_sleep * 1000));
-        else esp_sleep_enable_timer_wakeup((uint64_t)(sleep_time * 1000));
+        if (stub_sleep) esp_sleep_enable_timer_wakeup(stub_sleep * 1000);
+        else esp_sleep_enable_timer_wakeup(sleep_time * 1000);
         machine_rtc_config.deepsleep_time = sleep_time;
     }
     else {
@@ -514,7 +516,7 @@ STATIC mp_obj_t machine_deepsleep(size_t n_args, const mp_obj_t *pos_args, mp_ma
         esp_sleep_enable_touchpad_wakeup();
     }
 
-    ESP_LOGD("DEEP SLEEP", "Sleep time: time=%d, interval=%d, pin=%d, level=%d, wait=%llu\n",
+    ESP_LOGD("DEEP SLEEP", "Sleep time: time=%llu, interval=%llu, pin=%d, level=%d, wait=%llu\n",
             sleep_time, stub_sleep, led_pin, args[ARG_stub_ledlevel].u_bool, wait_in_stub);
     prepareSleepReset(0, NULL);
 
@@ -531,8 +533,8 @@ STATIC mp_obj_t machine_deepsleep(size_t n_args, const mp_obj_t *pos_args, mp_ma
         if (stub_sleep) {
             // Get number of microseconds per RTC clock tick (scaled by 2^19)
             // Calculate RTC clock value for wakeup
-            machine_rtc_config.wakeup_delay_ticks = (uint64_t)(stub_sleep * 1000) * (1 << RTC_CLK_CAL_FRACT) / s_rtc_clk_cal;
-            machine_rtc_config.wakeup_delay_ticks_last = (uint64_t)((sleep_time % stub_sleep) * 1000) * (1 << RTC_CLK_CAL_FRACT) / s_rtc_clk_cal;;
+            machine_rtc_config.wakeup_delay_ticks = (stub_sleep * 1000) * (1 << RTC_CLK_CAL_FRACT) / s_rtc_clk_cal;
+            machine_rtc_config.wakeup_delay_ticks_last = ((sleep_time % stub_sleep) * 1000) * (1 << RTC_CLK_CAL_FRACT) / s_rtc_clk_cal;;
 
             // Set the wake stub function
             machine_rtc_config.deepsleep_interval = stub_sleep;
@@ -864,10 +866,21 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_0(mod_machine_vdd33_obj, mod_machine_vdd33);
 
 //--------------------------------------------------------------
 STATIC mp_obj_t mod_machine_stdin_disable(mp_obj_t pattern_in) {
-    const char *pattern = mp_obj_str_get_str(pattern_in);
-    if (strlen(pattern) >= 16) {
-        nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, "pattern string too long (15 chars allowed)"));
+    bool has_pattern = false;
+    mp_buffer_info_t pattern_buff;
+    mp_obj_type_t *type = mp_obj_get_type(pattern_in);
+    char pattern[16] = {'\0'};
+    if (type->buffer_p.get_buffer != NULL) {
+        int ret = type->buffer_p.get_buffer(pattern_in, &pattern_buff, MP_BUFFER_READ);
+        if (ret == 0) {
+            if ((pattern_buff.len > 0) && (pattern_buff.len < 16)) has_pattern = true;
+        }
     }
+    if (!has_pattern) {
+        mp_raise_ValueError("invalid pattern (15 chars allowed)");
+    }
+
+    memcpy(pattern, pattern_buff.buf, pattern_buff.len);
     disableStdin(pattern);
     return mp_const_none;
 }
@@ -886,6 +899,24 @@ STATIC mp_obj_t mod_machine_set_wdt() {
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(mod_machine_set_wdt_obj, mod_machine_set_wdt);
+
+//--------------------------------------------------------------------
+STATIC mp_obj_t mod_machine_wdt(size_t n_args, const mp_obj_t *args) {
+    #ifdef CONFIG_MICROPY_USE_TASK_WDT
+    esp_err_t res;
+    res = esp_task_wdt_status(NULL);
+    if (n_args > 0) {
+        if ((mp_obj_is_true(args[0])) && (res != ESP_OK)) esp_task_wdt_add(NULL);
+        else if ((!mp_obj_is_true(args[0])) && (res == ESP_OK)) esp_task_wdt_delete(NULL);
+    }
+    res = esp_task_wdt_status(NULL);
+    if (res == ESP_OK) return mp_const_true;
+    return mp_const_false;
+    #else
+    return mp_const_false;
+    #endif
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_machine_wdt_obj, 0, 1, mod_machine_wdt);
 
 //-----------------------------------------------------------------------
 static void _set_stack_heap(char *key, int value, int valmin, int valmax)
@@ -941,6 +972,7 @@ STATIC const mp_rom_map_elem_t machine_module_globals_table[] = {
         { MP_ROM_QSTR(MP_QSTR_reset),					MP_ROM_PTR(&machine_reset_obj) },
         { MP_ROM_QSTR(MP_QSTR_resetWDT),				MP_ROM_PTR(&mod_machine_reset_wdt_obj) },
         { MP_ROM_QSTR(MP_QSTR_setWDT),					MP_ROM_PTR(&mod_machine_set_wdt_obj) },
+        { MP_ROM_QSTR(MP_QSTR_WDT),                     MP_ROM_PTR(&mod_machine_wdt_obj) },
         { MP_ROM_QSTR(MP_QSTR_unique_id),				MP_ROM_PTR(&machine_unique_id_obj) },
         { MP_ROM_QSTR(MP_QSTR_idle),					MP_ROM_PTR(&machine_idle_obj) },
         { MP_OBJ_NEW_QSTR(MP_QSTR_deepsleep),			MP_ROM_PTR(&machine_deepsleep_obj) },
@@ -990,6 +1022,9 @@ STATIC const mp_rom_map_elem_t machine_module_globals_table[] = {
         { MP_OBJ_NEW_QSTR(MP_QSTR_Onewire),				MP_ROM_PTR(&machine_onewire_type) },
 #ifdef CONFIG_MICROPY_USE_GPS
         { MP_OBJ_NEW_QSTR(MP_QSTR_GPS),					MP_ROM_PTR(&machine_gps_type) },
+#endif
+#ifdef CONFIG_MICROPY_USE_RFCOMM
+        { MP_OBJ_NEW_QSTR(MP_QSTR_RFCOMM),              MP_ROM_PTR(&machine_rfcomm_type) },
 #endif
         // Constants
         { MP_ROM_QSTR(MP_QSTR_LOG_NONE),				MP_ROM_INT(ESP_LOG_NONE) },

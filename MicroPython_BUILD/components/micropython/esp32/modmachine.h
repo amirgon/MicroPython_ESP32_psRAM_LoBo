@@ -38,9 +38,11 @@
 #include "driver/rtc_io.h"
 
 #define MPY_MIN_STACK_SIZE	(6*1024)
-#define EXT1_WAKEUP_ALL_HIGH	2    //!< Wake the chip when all selected GPIOs go high
+#define EXT1_WAKEUP_ALL_HIGH	2           //!< Wake the chip when all selected GPIOs go high
 #define EXT1_WAKEUP_MAX_PINS	4
-#define ADC_TIMER_NUM			3	// Timer used in ADC module
+#define ADC_TIMER_NUM			3	        // Timer used in ADC module
+#define ADC_TIMER_DIVIDER       8           // 0.1 us per tick, 10 MHz
+#define ADC_TIMER_FREQ          10000000.0  //Timer frequency
 
 typedef struct {
     int8_t		ext1_pins[EXT1_WAKEUP_MAX_PINS];
@@ -121,11 +123,13 @@ extern const mp_obj_type_t machine_neopixel_type;
 extern const mp_obj_type_t machine_dht_type;
 extern const mp_obj_type_t machine_onewire_type;
 extern const mp_obj_type_t machine_ds18x20_type;
+#ifdef CONFIG_MICROPY_USE_RFCOMM
+extern const mp_obj_type_t machine_rfcomm_type;
+#endif
 #ifdef CONFIG_MICROPY_USE_GPS
 extern const mp_obj_type_t machine_gps_type;
 #endif
 extern nvs_handle mpy_nvs_handle;
-extern int mpy_repl_stack_size;
 extern int mpy_heap_size;
 
 void machine_pins_init(void);

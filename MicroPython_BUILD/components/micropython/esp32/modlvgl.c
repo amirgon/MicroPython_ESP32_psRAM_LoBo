@@ -38,7 +38,7 @@ static void lv_task(void* param)
     while(1)
     {
         vTaskDelay(5);
-        mp_sched_schedule((mp_obj_t)&mp_lv_task_handler_obj, mp_const_none, NULL);
+        mp_sched_schedule((mp_obj_t)&mp_lv_task_handler_obj, mp_const_none);
     }
 }
 

@@ -47,7 +47,6 @@
 #include "extmod/vfs_native.h"
 
 #define ADC1_CHANNEL_HALL	ADC1_CHANNEL_MAX
-#define ADC_TIMER_DIVIDER	80		// 1 us per tick, 1 MHz
 #define I2S_RD_BUF_SIZE     (1024*2)
 
 typedef struct _madc_obj_t {
@@ -174,7 +173,7 @@ static void adc_task(void *pvParameters)
     }
 
     self->buf_ptr = 0;
-    collect_start_time = mp_hal_ticks_us();
+    collect_start_time = esp_timer_get_time(); //mp_hal_ticks_us();
     collect_end_time = collect_start_time;
 
     // read ADC data
@@ -209,7 +208,7 @@ static void adc_task(void *pvParameters)
         //vTaskDelay(0); // allow other core idle task to reset the watchdog
         //#endif
     }
-    collect_end_time = mp_hal_ticks_us();
+    collect_end_time = esp_timer_get_time(); //mp_hal_ticks_us();
 
     if (self->fhndl) {
         // reading to file, close file and free the buffer
@@ -219,7 +218,7 @@ static void adc_task(void *pvParameters)
         if (buff16) free(buff16);
     }
 
-    if (self->callback) mp_sched_schedule(self->callback, self, NULL);
+    if (self->callback) mp_sched_schedule_ex(self->callback, self, NULL);
 
 exit:
     // i2s cleanup
@@ -228,6 +227,7 @@ exit:
     i2s_driver_installed = false;
     if (i2s_read_buff) free(i2s_read_buff);
 
+    esp_log_level_set("I2S", CONFIG_LOG_DEFAULT_LEVEL);
     task_stop = false;
     task_running = false;
 
@@ -254,7 +254,7 @@ STATIC void adc_timer_isr(void *self_in)
     uint16_t *buffer16 = (uint16_t *)self->buffer;
     uint8_t *buffer8 = (uint8_t *)self->buffer;
 
-    if (self->buf_ptr == 0) collect_start_time = mp_hal_ticks_us();
+    if (self->buf_ptr == 0) collect_start_time = esp_timer_get_time(); //mp_hal_ticks_us();
 
     // --- Read ADC value ---
     int val = 0;
@@ -301,8 +301,8 @@ STATIC void adc_timer_isr(void *self_in)
             esp_intr_free(adc_timer_handle);
             adc_timer_handle = NULL;
         }
-        collect_end_time = mp_hal_ticks_us();
-        if (self->callback) mp_sched_schedule(self->callback, self, NULL);
+        collect_end_time = esp_timer_get_time(); //mp_hal_ticks_us();
+        if (self->callback) mp_sched_schedule_ex(self->callback, self, NULL);
         self->buffer = NULL;
         adc_timer_active = false;
         collect_active = false;
@@ -735,10 +735,10 @@ STATIC mp_obj_t madc_collect(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_
     }
 
     double freq = mp_obj_get_float(args[ARG_freq].u_obj);
-    if ((freq < 0.001) || (freq > 10000.0)) {
-        mp_raise_ValueError("frequency out of range (0.001 - 10000 Hz)");
+    if ((freq < 0.001) || (freq > 18000.0)) {
+        mp_raise_ValueError("frequency out of range (0.001 - 18000 Hz)");
     }
-    double interv = (1.0 / freq) * 1000000.0;
+    double interv = (1.0 / freq) * ADC_TIMER_FREQ;
     self->callback = NULL;
     self->buffer = NULL;
     self->buf_ptr = 0;
@@ -799,12 +799,12 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_KW(madc_collect_obj, 0, madc_collect);
 
 //----------------------------------------------------------------------------------------------
 STATIC mp_obj_t madc_read_timed(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
-    enum { ARG_data, ARG_freq, ARG_len, ARG_8bit, ARG_wait, ARG_callback };
+    enum { ARG_data, ARG_freq, ARG_len, ARG_byte, ARG_wait, ARG_callback };
     const mp_arg_t allowed_args[] = {
             { MP_QSTR_data,     MP_ARG_REQUIRED | MP_ARG_OBJ,  {.u_obj = mp_const_none} },
             { MP_QSTR_freq,     MP_ARG_REQUIRED | MP_ARG_OBJ,  {.u_obj = mp_const_none} },
             { MP_QSTR_nsamples, MP_ARG_KW_ONLY  | MP_ARG_INT,  {.u_int = -1} },
-            { MP_QSTR_8bit,     MP_ARG_KW_ONLY  | MP_ARG_BOOL, {.u_bool = true} },
+            { MP_QSTR_byte,     MP_ARG_KW_ONLY  | MP_ARG_BOOL, {.u_bool = true} },
             { MP_QSTR_wait,     MP_ARG_KW_ONLY  | MP_ARG_BOOL, {.u_bool = false}},
             { MP_QSTR_callback, MP_ARG_KW_ONLY  | MP_ARG_OBJ,  {.u_obj = mp_const_none} },
     };
@@ -866,7 +866,7 @@ STATIC mp_obj_t madc_read_timed(mp_uint_t n_args, const mp_obj_t *pos_args, mp_m
             mp_raise_ValueError("Error opening file");
         }
         // Allocate temporary data buffer
-        if (args[ARG_8bit].u_bool) {
+        if (args[ARG_byte].u_bool) {
             self->val_shift = self->width + 1;
         }
         self->buf_len = length;
@@ -971,7 +971,7 @@ STATIC mp_obj_t madc_progress(mp_obj_t self_in) {
     tuple[0] = mp_obj_new_bool(active);
     tuple[1] = mp_obj_new_int(self->buf_ptr);
     tuple[2] = mp_obj_new_int(self->buf_len);
-    if (active) tuple[3] = mp_obj_new_int_from_ull(mp_hal_ticks_us() - collect_start_time);
+    if (active) tuple[3] = mp_obj_new_int_from_ull(esp_timer_get_time() /*mp_hal_ticks_us()*/ - collect_start_time);
     else tuple[3] = mp_obj_new_int_from_ull(collect_end_time - collect_start_time);
 
     return mp_obj_new_tuple(4, tuple);
@@ -996,7 +996,7 @@ STATIC mp_obj_t madc_stop_collect(mp_obj_t self_in) {
             esp_intr_free(adc_timer_handle);
             adc_timer_handle = NULL;
         }
-        collect_end_time = mp_hal_ticks_us();
+        collect_end_time = esp_timer_get_time(); //mp_hal_ticks_us();
         self->buffer = NULL;
         adc_timer_active = false;
         collect_active = false;

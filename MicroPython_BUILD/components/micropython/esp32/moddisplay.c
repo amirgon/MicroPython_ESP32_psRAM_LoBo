@@ -42,7 +42,9 @@
 #include "driver/gpio.h"
 #include "extmod/vfs_native.h"
 #include "modmachine.h"
+#include "sdkconfig.h"
 
+#ifdef CONFIG_MICROPY_USE_DISPLAY
 
 uint8_t disp_used_spi_host = 0;
 
@@ -1652,13 +1654,29 @@ const mp_obj_type_t display_tft_type = {
     .locals_dict = (mp_obj_t)&display_tft_locals_dict,
 };
 
+#include <stdint.h>
 
+#include "py/obj.h"
+
+
+#ifdef CONFIG_MICROPY_USE_TFT
+extern const mp_obj_type_t display_tft_type;
+#endif
+
+#ifdef CONFIG_MICROPY_USE_EVE
+extern const mp_obj_type_t display_eve_type;
+#endif
 
 //===============================================================
 STATIC const mp_rom_map_elem_t display_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_display) },
 
+    #ifdef CONFIG_MICROPY_USE_TFT
     { MP_OBJ_NEW_QSTR(MP_QSTR_TFT), MP_ROM_PTR(&display_tft_type) },
+    #endif
+    #ifdef CONFIG_MICROPY_USE_EVE
+    { MP_OBJ_NEW_QSTR(MP_QSTR_EVE), MP_ROM_PTR(&display_eve_type) },
+    #endif
 };
 
 //===============================================================================
@@ -1698,3 +1716,4 @@ color_t intToColor(uint32_t cint) {
     cl.b = cint & 0xFF;
     return cl;
 }
+#endif

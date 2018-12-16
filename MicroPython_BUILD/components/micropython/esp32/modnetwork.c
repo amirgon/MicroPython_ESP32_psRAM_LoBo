@@ -40,6 +40,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "libs/libGSM.h"
 #include "py/nlr.h"
 #include "py/objlist.h"
 #include "py/runtime.h"
@@ -51,7 +52,6 @@
 #include "esp_event_loop.h"
 #include "esp_log.h"
 #include "lwip/dns.h"
-#include "tcpip_adapter.h"
 #ifdef CONFIG_MICROPY_USE_MDNS
 #include "mdns.h"
 #endif
@@ -66,7 +66,7 @@ static const char *MODNETTWORK_TAG = "[modnetwork]";
 
 NORETURN void _esp_exceptions(esp_err_t e) {
    switch (e) {
-      case ESP_ERR_WIFI_NOT_INIT: 
+      case ESP_ERR_WIFI_NOT_INIT:
         mp_raise_msg(&mp_type_OSError, "Wifi Not Initialized");
         break;
       case ESP_ERR_WIFI_NOT_STARTED:
@@ -113,7 +113,7 @@ NORETURN void _esp_exceptions(esp_err_t e) {
         break;
       case ESP_ERR_TCPIP_ADAPTER_NO_MEM:
       case ESP_ERR_NO_MEM:
-        mp_raise_OSError(MP_ENOMEM); 
+        mp_raise_OSError(MP_ENOMEM);
         break;
       default:
         nlr_raise(mp_obj_new_exception_msg_varg(
@@ -184,6 +184,7 @@ bool wifi_sta_has_ipaddress = false;
 bool wifi_sta_changed_ipaddress = false;
 bool wifi_ap_isconnected = false;
 bool wifi_ap_sta_isconnected = false;
+tcpip_adapter_if_t tcpip_if[MAX_ACTIVE_INTERFACES] = {TCPIP_ADAPTER_IF_MAX};
 
 const mp_obj_type_t wlan_if_type;
 const wlan_if_obj_t wlan_sta_obj = {{&wlan_if_type}, WIFI_IF_STA, WIFI_MODE_STA};
@@ -214,7 +215,7 @@ static void processPROBEREQRECVED(const uint8_t *frame, int len, int rssi)
 		if (!make_carg_entry(carg, 1, MP_SCHED_ENTRY_TYPE_INT, len, NULL, "len")) goto end;
 		if (!make_carg_entry(carg, 2, MP_SCHED_ENTRY_TYPE_STR, len, frame, "frame")) goto end;
 
-		mp_sched_schedule(probereq_callback, mp_const_none, carg);
+		mp_sched_schedule_ex(probereq_callback, mp_const_none, carg);
 end:
 		if (probereq_mutex) xSemaphoreGive(probereq_mutex);
 	}
@@ -357,7 +358,7 @@ static void processEvent_callback(system_event_t *event)
 			// the 3rd tuple item was not added, add it now
 			if (!make_carg_entry(carg, 2, MP_SCHED_ENTRY_TYPE_NONE, 0, NULL, NULL)) return;
 		}
-		mp_sched_schedule(event_callback, mp_const_none, carg);
+		mp_sched_schedule_ex(event_callback, mp_const_none, carg);
 	}
 }
 
@@ -763,12 +764,13 @@ STATIC mp_obj_t esp_status(size_t n_args, const mp_obj_t *args) {
             mp_obj_t list = mp_obj_new_list(0, NULL);
             for (int i = 0; i < station_list.num; ++i) {
             	ip4_addr_t addr;
-                mp_obj_tuple_t *t = mp_obj_new_tuple(2, NULL);
+                mp_obj_tuple_t *t = mp_obj_new_tuple(3, NULL);
                 t->items[0] = mp_obj_new_bytes(stations[i].mac, sizeof(stations[i].mac));
                 if (dhcp_search_ip_on_mac(stations[i].mac , &addr)) {
                 	t->items[1] = netutils_format_ipv4_addr((uint8_t*)&addr.addr, NETUTILS_BIG);
                 }
                 else t->items[1] = mp_const_none;
+                t->items[2] = MP_OBJ_NEW_SMALL_INT(stations[i].rssi);
                 mp_obj_list_append(list, t);
             }
             return list;
@@ -1213,6 +1215,93 @@ STATIC mp_obj_t esp_phy_mode(size_t n_args, const mp_obj_t *args) {
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(esp_phy_mode_obj, 0, 1, esp_phy_mode);
 
 
+//---------------------------------
+int network_get_active_interfaces()
+{
+    int n_if = 0;
+
+    for (int i=0; i<MAX_ACTIVE_INTERFACES; i++) {
+        tcpip_if[i] = TCPIP_ADAPTER_IF_MAX;
+    }
+    if ((wifi_network_state == WIFI_STATE_STARTED) && (wifi_is_started())) {
+        wifi_mode_t mode;
+        esp_err_t ret = esp_wifi_get_mode(&mode);
+        if (ret == ESP_OK) {
+            if (mode == WIFI_MODE_STA) {
+                n_if = 1;
+                tcpip_if[0] = TCPIP_ADAPTER_IF_STA;
+            }
+            else if (mode == WIFI_MODE_AP) {
+                n_if = 1;
+                tcpip_if[0] = TCPIP_ADAPTER_IF_AP;
+            }
+            else if (mode == WIFI_MODE_APSTA) {
+                n_if = 2;
+                tcpip_if[0] = TCPIP_ADAPTER_IF_STA;
+                tcpip_if[1] = TCPIP_ADAPTER_IF_AP;
+            }
+        }
+    }
+
+    #ifdef CONFIG_MICROPY_USE_ETHERNET
+    if (lan_eth_active) {
+        n_if++;
+        tcpip_if[n_if-1] = TCPIP_ADAPTER_IF_ETH;
+    }
+    #endif
+
+    return n_if;
+}
+
+//----------------------
+uint32_t network_hasip()
+{
+    tcpip_adapter_ip_info_t ip_info = {0};
+    int n_if = network_get_active_interfaces();
+    if (n_if) {
+        for (int i=0; i<n_if; i++) {
+            tcpip_adapter_get_ip_info(tcpip_if[i], &ip_info);
+            if (ip_info.ip.addr > 0) {
+                return ip_info.ip.addr;
+            }
+        }
+    }
+    return 0;
+}
+
+//--------------------------
+uint32_t network_has_staip()
+{
+    tcpip_adapter_ip_info_t ip_info = {0};
+    int n_if = network_get_active_interfaces();
+    if (n_if) {
+        for (int i=0; i<n_if; i++) {
+            tcpip_adapter_get_ip_info(tcpip_if[i], &ip_info);
+            if (((tcpip_if[i] == TCPIP_ADAPTER_IF_STA) || (tcpip_if[i] == TCPIP_ADAPTER_IF_ETH)) && (ip_info.ip.addr > 0)) {
+                return ip_info.ip.addr;
+            }
+        }
+    }
+    return 0;
+}
+
+//----------------------------
+void network_checkConnection()
+{
+    uint32_t ip = network_has_staip();
+    if (ip == 0) {
+        #ifdef CONFIG_MICROPY_USE_GSM
+        if (ppposStatus(NULL, NULL, NULL) != GSM_STATE_CONNECTED) {
+            nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "No Internet connection"));
+        }
+        #else
+        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, "No Internet connection"));
+        #endif
+    }
+}
+
+
+
 #ifdef CONFIG_MICROPY_USE_MQTT
 extern const mp_obj_type_t mqtt_type;
 #endif
@@ -1227,37 +1316,16 @@ extern const mp_obj_type_t mqtt_type;
 //-----------------------------
 static mp_obj_t get_listen_ip()
 {
-    if ((wifi_network_state == WIFI_STATE_STARTED) && (wifi_is_started())) {
-    	wifi_mode_t mode;
-    	tcpip_adapter_if_t tcpip_if = TCPIP_ADAPTER_IF_MAX;
-    	int n_if = 0;
-		esp_err_t ret = esp_wifi_get_mode(&mode);
-		if (ret == ESP_OK) {
-			if (mode == WIFI_MODE_STA) {
-				n_if = 1;
-				tcpip_if = TCPIP_ADAPTER_IF_STA;
-			}
-			else if (mode == WIFI_MODE_AP) {
-				n_if = 1;
-				tcpip_if = TCPIP_ADAPTER_IF_AP;
-			}
-			else if (mode == WIFI_MODE_APSTA) n_if = 2;
-		}
-		if (n_if > 0) {
-			tcpip_adapter_ip_info_t info;
-			mp_obj_t ip_tuple[n_if];
-			if (n_if == 1) {
-				tcpip_adapter_get_ip_info(tcpip_if, &info);
-                ip_tuple[0] = netutils_format_ipv4_addr((uint8_t*)&info.ip, NETUTILS_BIG);
-			}
-			else {
-				tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &info);
-                ip_tuple[0] = netutils_format_ipv4_addr((uint8_t*)&info.ip, NETUTILS_BIG);
-				tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_AP, &info);
-                ip_tuple[1] = netutils_format_ipv4_addr((uint8_t*)&info.ip, NETUTILS_BIG);
-			}
-			return mp_obj_new_tuple(n_if, ip_tuple);
-		}
+    tcpip_adapter_ip_info_t info;
+    int n_if = network_get_active_interfaces();
+
+    if (n_if > 0) {
+        mp_obj_t ip_tuple[n_if];
+        for (int i=0; i<n_if; i++) {
+            tcpip_adapter_get_ip_info(tcpip_if[i], &info);
+            ip_tuple[i] = netutils_format_ipv4_addr((uint8_t*)&info.ip, NETUTILS_BIG);
+        }
+        return mp_obj_new_tuple(n_if, ip_tuple);
     }
     return mp_const_none;
 }
@@ -1276,13 +1344,22 @@ STATIC mp_obj_t mod_network_startTelnet(mp_uint_t n_args, const mp_obj_t *pos_ar
 			{ MP_QSTR_user,         MP_ARG_KW_ONLY  | MP_ARG_OBJ,  {.u_obj = mp_const_none} },
 			{ MP_QSTR_password,     MP_ARG_KW_ONLY  | MP_ARG_OBJ,  {.u_obj = mp_const_none} },
 			{ MP_QSTR_timeout,		MP_ARG_KW_ONLY  | MP_ARG_INT,  {.u_int = TELNET_DEF_TIMEOUT_MS/1000} },
+            #if TELNET_LOGIN_MSG_LEN_MAX > 0
+            { MP_QSTR_login_msg,    MP_ARG_KW_ONLY  | MP_ARG_OBJ,  {.u_obj = mp_const_none} },
+            #endif
 	};
 	mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     if ((wifi_network_state < WIFI_STATE_STARTED) || (!wifi_is_started())) {
-        ESP_LOGE("[Telnet_start]", "WiFi not started or not connected");
-    	return mp_const_false;
+        #ifdef CONFIG_MICROPY_USE_ETHERNET
+        if (!lan_eth_active) {
+            ESP_LOGE("[Telnet_start]", "Network interface not started or not connected");
+            return mp_const_false;
+        }
+        #else
+        return mp_const_false;
+        #endif
     }
 
 	if (MP_OBJ_IS_STR(args[0].u_obj)) {
@@ -1295,6 +1372,12 @@ STATIC mp_obj_t mod_network_startTelnet(mp_uint_t n_args, const mp_obj_t *pos_ar
     }
 	else strcpy(telnet_pass, TELNET_DEF_PASS);
 
+    #if TELNET_LOGIN_MSG_LEN_MAX > 0
+    if (MP_OBJ_IS_STR(args[3].u_obj)) {
+        snprintf(telnet_login_success, TELNET_LOGIN_MSG_LEN_MAX, mp_obj_str_get_str(args[3].u_obj));
+    }
+    else snprintf(telnet_login_success, TELNET_LOGIN_MSG_LEN_MAX, "\r\nLogin succeeded!\r\nType \"help()\" for more information.\r\n");
+    #endif
     telnet_timeout = args[2].u_int * 1000;
     if ((telnet_timeout < 120000) || (telnet_timeout > 86400000)) telnet_timeout = TELNET_DEF_TIMEOUT_MS;
 
@@ -1400,8 +1483,14 @@ STATIC mp_obj_t mod_network_startFtp(mp_uint_t n_args, const mp_obj_t *pos_args,
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     if ((wifi_network_state < WIFI_STATE_STARTED) || (!wifi_is_started())) {
-        ESP_LOGE("[Ftp_start]", "WiFi not started or not connected");
-    	return mp_const_false;
+        #ifdef CONFIG_MICROPY_USE_ETHERNET
+        if (!lan_eth_active) {
+            ESP_LOGE("[Ftp_start]", "Network interface not started or not connected");
+            return mp_const_false;
+        }
+        #else
+        return mp_const_false;
+        #endif
     }
 
     if (MP_OBJ_IS_STR(args[0].u_obj)) {

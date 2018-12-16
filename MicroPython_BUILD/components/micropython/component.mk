@@ -101,15 +101,25 @@ MP_EXTRA_INC += -I$(ESPCOMP)/heap/include
 MP_EXTRA_INC += -I$(ESPCOMP)/openssl/include
 MP_EXTRA_INC += -I$(ESPCOMP)/app_update/include
 MP_EXTRA_INC += -I$(ESPCOMP)/mdns/include
+MP_EXTRA_INC += -I$(ESPCOMP)/esp_https_ota/include
 
 ifdef CONFIG_MICROPY_USE_BLUETOOTH
 MP_EXTRA_INC += -I$(ESPCOMP)/bt/include
 MP_EXTRA_INC += -I$(ESPCOMP)/bt/bluedroid/api/include
+else
+ifdef CONFIG_MICROPY_USE_RFCOMM
+MP_EXTRA_INC += -I$(ESPCOMP)/bt/include
+MP_EXTRA_INC += -I$(ESPCOMP)/bt/bluedroid/api/include
+endif
 endif
 
 ifdef CONFIG_MICROPY_USE_GPS
 MP_EXTRA_INC += -I$(PROJECT_PATH)/components/libnmea/src/nmea
 MP_EXTRA_INC += -I$(PROJECT_PATH)/components/libnmea/src/parsers
+endif
+
+ifdef CONFIG_MICROPY_USE_REQUESTS
+MP_EXTRA_INC += -I$(ESPCOMP)/esp_http_client/include/
 endif
 
 # CPP macro
@@ -183,6 +193,10 @@ ifdef CONFIG_MICROPY_USE_CURL
 SRC_C += esp32/modcurl.c
 endif
 
+ifdef CONFIG_MICROPY_USE_REQUESTS
+SRC_C += esp32/modrequests.c
+endif
+
 ifdef CONFIG_MICROPY_USE_GPS
 SRC_C += esp32/machine_gps.c
 endif
@@ -225,6 +239,9 @@ SRC_C += esp32/modlvgl.c
 SRC_C += $(PROJECT_PATH)/components/liblvgl/lvgl/micropython/lv_mpy.c
 endif
 
+ifdef CONFIG_MICROPY_USE_RFCOMM
+SRC_C += esp32/machine_rfcomm.c
+endif
 
 EXTMOD_SRC_C = $(addprefix extmod/,\
 	modbtree.c \
@@ -254,8 +271,9 @@ LIBS_SRC_C = $(addprefix esp32/libs/,\
 	littleflash.c \
 	)
 
-ifdef CONFIG_MICROPY_USE_DISPLAY
+ifdef CONFIG_MICROPY_USE_TFT
 LIBS_SRC_C += \
+	esp32/moddisplay_tft.c \
 	esp32/libs/tft/tftspi.c \
 	esp32/libs/tft/tft.c \
 	esp32/libs/tft/comic24.c \
@@ -272,7 +290,8 @@ endif
 
 ifdef CONFIG_MICROPY_USE_EVE
 LIBS_SRC_C += \
-	esp32/libs/eve/FT8_commands.c
+	esp32/libs/eve/FT8_commands.c \
+	esp32/moddisplay_eve.c
 endif
 
 ifeq ($(MICROPY_PY_BTREE),1)
